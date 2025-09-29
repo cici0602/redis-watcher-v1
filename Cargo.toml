@@ -1,5 +1,5 @@
 [package]
-name = "casbin-redis-watcher"
+name = "redis-watcher"
 version = "0.1.0"
 edition = "2021"
 description = "Redis watcher for Casbin-RS"
