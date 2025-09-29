@@ -7,10 +7,12 @@ on:
     branches:
       - master
       - main
+      - watcher-test-v2
   pull_request:
     branches:
       - master
       - main
+      - watcher-test-v2
 
 jobs:
   test:
