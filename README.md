@@ -3,8 +3,8 @@ Redis Watcher
 
 [![Crates.io](https://img.shields.io/crates/v/redis-watcher.svg)](https://crates.io/crates/redis-watcher)
 [![Docs](https://docs.rs/redis-watcher/badge.svg)](https://docs.rs/redis-watcher)
-[![Build Status](https://github.com/casbin-rs/redis-watcher/actions/workflows/ci.yml/badge.svg)](https://github.com/casbin-rs/redis-watcher/actions/workflows/ci.yml)
-[![Codecov](https://codecov.io/gh/casbin-rs/redis-watcher/branch/master/graph/badge.svg)](https://codecov.io/gh/casbin-rs/redis-watcher)
+[![Build Status](https://github.com/cici0602/redis-watcher-v1/actions/workflows/ci.yml/badge.svg)](https://github.com/cici0602/redis-watcher-v1/actions/workflows/ci.yml)
+[![Codecov](https://codecov.io/gh/cici0602/redis-watcher-v1/branch/watcher-test--v2-ci/graph/badge.svg)](https://codecov.io/gh/cici0602/redis-watcher-v1)
 
 
 Redis Watcher is a [Redis](http://redis.io) watcher for [Casbin-RS](https://github.com/casbin/casbin-rs).
