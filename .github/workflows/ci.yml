@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust-version: ['1.75', 'stable']
+        rust-version: ['1.82', 'stable']
         redis-mode: ['standalone', 'cluster']
 
     services:
@@ -62,9 +62,9 @@ jobs:
       - name: Setup Redis Cluster
         if: matrix.redis-mode == 'cluster'
         run: |
-          # Install redis-cli for cluster setup
+          # Install redis-server and redis-cli for cluster setup
           sudo apt-get update
-          sudo apt-get install -y redis-tools
+          sudo apt-get install -y redis-server redis-tools
           
           # Create Redis cluster configuration
           mkdir -p /tmp/redis-cluster
@@ -143,7 +143,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macOS-latest]
-        rust-version: ['1.75', 'stable']
+        rust-version: ['1.82', 'stable']
 
     steps:
       - name: Checkout code
