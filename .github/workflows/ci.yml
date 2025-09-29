@@ -15,23 +15,17 @@ on:
       - watcher-test-v2
 
 jobs:
-  test:
-    name: Test Suite
-    runs-on: ${{ matrix.os }}
+  test-linux:
+    name: Test Suite (Linux with Redis)
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macOS-latest]
         rust-version: ['1.75', 'stable']
         redis-mode: ['standalone', 'cluster']
-        exclude:
-          # Skip Redis cluster tests on non-Linux platforms due to complexity
-          - os: windows-latest
-            redis-mode: cluster
-          - os: macOS-latest
-            redis-mode: cluster
 
     services:
+      # Redis service is only available on Linux runners
       redis:
         image: redis
         ports:
@@ -66,7 +60,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Setup Redis Cluster
-        if: matrix.redis-mode == 'cluster' && runner.os == 'Linux'
+        if: matrix.redis-mode == 'cluster'
         run: |
           # Install redis-cli for cluster setup
           sudo apt-get update
@@ -115,7 +109,7 @@ jobs:
         run: cargo build --verbose --all-features
 
       - name: Run security audit
-        if: matrix.rust-version == 'stable' && runner.os == 'Linux'
+        if: matrix.rust-version == 'stable'
         run: |
           cargo install cargo-audit
           cargo audit
@@ -134,7 +128,7 @@ jobs:
           cargo test test_watcher_ignore_self --verbose -- --ignored
 
       - name: Run Redis cluster integration tests
-        if: matrix.redis-mode == 'cluster' && runner.os == 'Linux'
+        if: matrix.redis-mode == 'cluster'
         run: |
           # Set environment variable to indicate Redis cluster is available
           export REDIS_CLUSTER_AVAILABLE=true
@@ -142,9 +136,53 @@ jobs:
           cargo test test_redis_cluster_watcher --verbose -- --ignored
           cargo test test_cluster_failover --verbose -- --ignored
 
+  test-cross-platform:
+    name: Cross-platform Test Suite
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macOS-latest]
+        rust-version: ['1.75', 'stable']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust-version }}
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ matrix.rust-version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.rust-version }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Build
+        run: cargo build --verbose --all-features
+
+      - name: Run unit tests
+        run: cargo test --verbose --lib
+
   semantic-release:
     name: Semantic Release
-    needs: [test]
+    needs: [test-linux, test-cross-platform]
     if: github.repository == 'casbin-rs/redis-watcher' && github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
