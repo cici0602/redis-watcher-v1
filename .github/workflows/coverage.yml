@@ -42,10 +42,10 @@ jobs:
           rustup update --no-self-update stable
           rustup default stable
 
-      - name: Install redis-tools for cluster setup
+      - name: Install Redis server and tools for cluster setup
         run: |
           sudo apt-get update
-          sudo apt-get install -y redis-tools
+          sudo apt-get install -y redis-server redis-tools
 
       - name: Setup Redis Cluster
         run: |
