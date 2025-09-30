@@ -70,13 +70,21 @@ jobs:
           done
           
           # Wait for nodes to start
-          sleep 10
+          sleep 15
+          
+          # Verify nodes are running
+          for port in 7000 7001 7002 7003 7004 7005; do
+            redis-cli -p $port ping
+          done
           
           # Create cluster
           echo "yes" | redis-cli --cluster create \
             127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 \
             127.0.0.1:7003 127.0.0.1:7004 127.0.0.1:7005 \
             --cluster-replicas 1
+          
+          # Verify cluster is working
+          redis-cli -c -p 7000 cluster nodes
 
       - name: Run cargo-tarpaulin
         run: |
@@ -84,7 +92,7 @@ jobs:
           export REDIS_AVAILABLE=true
           export REDIS_URL=redis://127.0.0.1:6379
           export REDIS_CLUSTER_AVAILABLE=true
-          export REDIS_CLUSTER_URLS=127.0.0.1:7000,127.0.0.1:7001,127.0.0.1:7002
+          export REDIS_CLUSTER_URLS=redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002
           
           cargo install cargo-tarpaulin
           cargo tarpaulin --out xml
