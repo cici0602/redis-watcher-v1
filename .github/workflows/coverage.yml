@@ -5,6 +5,7 @@ on:
     branches:
       - master
       - main
+      - test/crate
       - watcher-test-v2
       - test/codecov
       - watcher-test--v2-ci
@@ -12,6 +13,7 @@ on:
     branches:
       - master
       - main
+      - test/crate
       - watcher-test-v2
       - test/codecov
       - watcher-test--v2-ci
