@@ -6,11 +6,15 @@ on:
       - master
       - main
       - watcher-test-v2
+      - test/codecov
+      - watcher-test--v2-ci
   pull_request:
     branches:
       - master
       - main
       - watcher-test-v2
+      - test/codecov
+      - watcher-test--v2-ci
 
 jobs:
   test-linux:

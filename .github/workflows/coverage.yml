@@ -5,10 +5,14 @@ on:
     branches:
       - master
       - main
+      - test/codecov
+      - watcher-test--v2-ci
   pull_request:
     branches:
       - master
       - main
+      - test/codecov
+      - watcher-test--v2-ci
 
 jobs:
   coverage:
