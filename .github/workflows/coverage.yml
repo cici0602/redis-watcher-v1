@@ -5,18 +5,20 @@ on:
     branches:
       - master
       - main
+      - watcher-test-v2
       - test/codecov
       - watcher-test--v2-ci
   pull_request:
     branches:
       - master
       - main
+      - watcher-test-v2
       - test/codecov
       - watcher-test--v2-ci
 
 jobs:
-  coverage:
-    name: Generate Coverage Report
+  cover:
+    name: Auto Codecov Coverage
     runs-on: ubuntu-latest
 
     services:
@@ -35,23 +37,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-coverage-
-            ${{ runner.os }}-cargo-
+        run: |
+          rustup set profile minimal
+          rustup update --no-self-update stable
+          rustup default stable
 
       - name: Install redis-tools for cluster setup
         run: |
@@ -89,10 +78,7 @@ jobs:
             127.0.0.1:7003 127.0.0.1:7004 127.0.0.1:7005 \
             --cluster-replicas 1
 
-      - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov
-
-      - name: Generate coverage report with all tests
+      - name: Run cargo-tarpaulin
         run: |
           # Set environment variables for Redis services
           export REDIS_AVAILABLE=true
@@ -100,19 +86,10 @@ jobs:
           export REDIS_CLUSTER_AVAILABLE=true
           export REDIS_CLUSTER_URLS=127.0.0.1:7000,127.0.0.1:7001,127.0.0.1:7002
           
-          # Generate coverage including integration tests
-          cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
-          
-          # Verify the coverage file was created
-          ls -la lcov.info || echo "Coverage file not found!"
-          head -20 lcov.info || echo "Cannot read coverage file!"
+          cargo install cargo-tarpaulin
+          cargo tarpaulin --out xml
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
+      - name: Upload to codecov.io
+        uses: codecov/codecov-action@v4
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./lcov.info
-          fail_ci_if_error: false
-          verbose: true
-          flags: unittests
-          name: codecov-umbrella
+          token: ${{secrets.CODECOV_TOKEN}}
