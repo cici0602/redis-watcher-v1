@@ -102,11 +102,17 @@ jobs:
           
           # Generate coverage including integration tests
           cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+          
+          # Verify the coverage file was created
+          ls -la lcov.info || echo "Coverage file not found!"
+          head -20 lcov.info || echo "Cannot read coverage file!"
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v3
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          file: lcov.info
+          files: ./lcov.info
           fail_ci_if_error: false
           verbose: true
+          flags: unittests
+          name: codecov-umbrella
