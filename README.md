@@ -15,7 +15,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-redis-watcher = "0.1"
+redis-watcher = "0.1.0"
 casbin = "2.2"
 tokio = { version = "1.0", features = ["full"] }
 redis = { version = "0.32", features = ["tokio-comp", "aio"] }
