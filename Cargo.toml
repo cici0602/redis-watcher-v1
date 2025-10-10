@@ -11,13 +11,6 @@ documentation = "https://docs.rs/redis-watcher-temp"
 readme = "README.md"
 keywords = ["casbin", "redis", "watcher", "authorization", "access-control"]
 include = ["src/**/*", "examples/**/*", "README.md", "LICENSE", "Cargo.toml"]
-exclude = [
-    "target/**/*",
-    ".github/**/*",
-    ".git/**/*",
-    ".gitignore",
-    "Cargo.lock",
-]
 
 [dependencies]
 casbin = { version = "2.13.0", features = ["watcher"] }
