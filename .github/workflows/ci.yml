@@ -1,0 +1,176 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  test-linux:
+    name: Test Suite (Linux with Redis)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust-version: ['1.82', 'stable']
+        redis-mode: ['standalone', 'cluster']
+
+    services:
+      # Redis service is only available on Linux runners
+      redis:
+        image: redis
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust-version }}
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ matrix.rust-version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.rust-version }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Setup Redis Cluster
+        if: matrix.redis-mode == 'cluster'
+        run: |
+          # Install redis-server and redis-cli for cluster setup
+          sudo apt-get update
+          sudo apt-get install -y redis-server redis-tools
+          
+          # Create Redis cluster configuration
+          mkdir -p /tmp/redis-cluster
+          for port in 7000 7001 7002 7003 7004 7005; do
+            mkdir -p /tmp/redis-cluster/$port
+            cat > /tmp/redis-cluster/$port/redis.conf << EOF
+          port $port
+          cluster-enabled yes
+          cluster-config-file nodes-$port.conf
+          cluster-node-timeout 5000
+          appendonly yes
+          bind 0.0.0.0
+          protected-mode no
+          EOF
+          done
+          
+          # Start Redis cluster nodes
+          for port in 7000 7001 7002 7003 7004 7005; do
+            redis-server /tmp/redis-cluster/$port/redis.conf --daemonize yes --dir /tmp/redis-cluster/$port/
+          done
+          
+          # Wait for nodes to start
+          sleep 10
+          
+          # Create cluster
+          echo "yes" | redis-cli --cluster create \
+            127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 \
+            127.0.0.1:7003 127.0.0.1:7004 127.0.0.1:7005 \
+            --cluster-replicas 1
+          
+          # Verify cluster status
+          redis-cli -p 7000 cluster info
+          redis-cli -p 7000 cluster nodes
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Build
+        run: cargo build --verbose --all-features
+
+      - name: Run security audit
+        if: matrix.rust-version == 'stable'
+        run: |
+          cargo install cargo-audit
+          cargo audit
+
+      - name: Run unit tests
+        run: cargo test --verbose --lib
+
+      - name: Run Redis standalone integration tests
+        if: matrix.redis-mode == 'standalone'
+        run: |
+          # Set environment variable to indicate Redis is available
+          export REDIS_AVAILABLE=true
+          export REDIS_URL=redis://127.0.0.1:6379
+          cargo test --verbose --lib -- --include-ignored
+
+      - name: Run Redis cluster integration tests
+        if: matrix.redis-mode == 'cluster'
+        run: |
+          # Set environment variable to indicate Redis cluster is available
+          export REDIS_CLUSTER_AVAILABLE=true
+          export REDIS_CLUSTER_URLS=redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002
+          # Run all cluster tests
+          cargo test test_redis_cluster_watcher_creation --verbose -- --ignored
+          cargo test test_redis_cluster_watcher_callback --verbose -- --ignored
+          cargo test test_redis_cluster_multiple_watchers --verbose -- --ignored
+          cargo test test_cluster_failover --verbose -- --ignored
+
+  test-cross-platform:
+    name: Cross-platform Test Suite
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macOS-latest]
+        rust-version: ['1.82', 'stable']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust-version }}
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ matrix.rust-version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.rust-version }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Build
+        run: cargo build --verbose --all-features
+
+      - name: Run unit tests
+        run: cargo test --verbose --lib
