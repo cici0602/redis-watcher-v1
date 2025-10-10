@@ -1,11 +1,13 @@
-# Redis Watcher for Casbin-RS
+Redis Watcher
+---
 
-[![Crates.io](https://img.shields.io/crates/v/redis-watcher-temp.svg)](https://crates.io/crates/redis-watcher-temp)
-[![Docs.rs](https://docs.rs/redis-watcher-temp/badge.svg)](https://docs.rs/redis-watcher-temp)
-[![CI](https://github.com/cici0602/redis-watcher-v1/actions/workflows/ci.yml/badge.svg)](https://github.com/cici0602/redis-watcher-v1/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Crates.io](https://img.shields.io/crates/v/redis-watcher.svg)](https://crates.io/crates/redis-watcher)
+[![Docs](https://docs.rs/redis-watcher/badge.svg)](https://docs.rs/redis-watcher)
+[![Build Status](https://github.com/casbin-rs/redis-watcher/actions/workflows/ci.yml/badge.svg)](https://github.com/casbin-rs/redis-watcher/actions/workflows/ci.yml)
+[![Codecov](https://codecov.io/gh/casbin-rs/redis-watcher/branch/master/graph/badge.svg)](https://codecov.io/gh/casbin-rs/redis-watcher)
 
-Redis Watcher is a [Redis](http://redis.io) watcher for [Casbin-RS](https://github.com/casbin/casbin-rs). It's designed to be compatible with the Go version of casbin-redis-watcher.
+
+Redis Watcher is a [Redis](http://redis.io) watcher for [Casbin-RS](https://github.com/casbin/casbin-rs).
 
 ## Installation
 
@@ -13,194 +15,160 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-redis-watcher-temp = "0.1"
-casbin = "2.2"
-tokio = { version = "1.0", features = ["full"] }
+redis-watcher = "0.1.0"
+casbin = { version = "2.13", features = ["watcher"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "time"] }
+redis = { version = "0.32", features = ["tokio-comp", "cluster-async", "aio"] }
 ```
+
+**Note**: The `watcher` feature is required for Casbin to enable watcher functionality. For Redis cluster support, include the `cluster-async` feature.
 
 ## Simple Example
 
 ```rust
-use casbin::prelude::*;
-use redis_watcher_temp::{RedisWatcher, WatcherOptions};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use redis_watcher::{RedisWatcher, WatcherOptions};
+use casbin::{prelude::*, Watcher, EventData};
 
-fn update_callback(msg: &str) {
-    println!("Policy updated: {}", msg);
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize the watcher with standalone Redis
-    let options = WatcherOptions::new()
-        .with_channel("/casbin".to_string())
-        .with_ignore_self(false); // Only false in test, generally should be true
-
-    let mut watcher = RedisWatcher::new("redis://localhost:6379", options).await?;
-
-    // Initialize the enforcer
-    let enforcer = Enforcer::new(
-        "examples/rbac_model.conf", 
-        "examples/rbac_policy.csv"
-    ).await?;
-    
-    let enforcer = Arc::new(Mutex::new(enforcer));
-
-    // Set the watcher for the enforcer
-    enforcer.lock().await.set_watcher(Box::new(watcher.clone())).await;
-
-    // Set custom callback
-    watcher.set_update_callback(update_callback).await?;
-
-    // Or use the default callback that reloads the enforcer
-    // watcher.set_update_callback(redis_watcher_temp::default_update_callback(enforcer.clone())).await?;
-
-    // Start listening for policy updates
-    watcher.start_subscription().await?;
-
-    // Update the policy to test the effect
-    // You should see "Policy updated: [policy change notification]" in the log
-    {
-        let mut e = enforcer.lock().await;
-        e.add_policy(vec!["alice".to_string(), "data1".to_string(), "read".to_string()]).await?;
-        e.save_policy().await?;
-    }
-
-    // Keep the program running
-    tokio::signal::ctrl_c().await?;
-    watcher.close().await?;
-    
-    Ok(())
-}
-```
-
-## Redis Cluster Example
-
-For Redis Cluster deployment:
-
-```rust
-use casbin::prelude::*;
-use redis_watcher_temp::{RedisWatcher, WatcherOptions};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize the watcher with Redis Cluster
+fn main() -> redis_watcher::Result<()> {
+    // Configure watcher options
     let options = WatcherOptions::default()
-        .with_channel("/casbin-policy-updates".to_string())
-        .with_ignore_self(true);
+        .with_channel("/casbin".to_string())
+        .with_ignore_self(false);  // Set to true in production to ignore self-updates
+    
+    // Create watcher for standalone Redis
+    let mut watcher = RedisWatcher::new("redis://127.0.0.1:6379", options)?;
 
-    // Provide comma-separated cluster node URLs
-    let cluster_urls = "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002";
-    let mut watcher = RedisWatcher::new_cluster(cluster_urls, options)?;
-
-    // Set callback to reload policies when notified
+    // Set callback to handle policy updates
     watcher.set_update_callback(Box::new(|msg: String| {
-        println!("Received policy update from cluster: {}", msg);
-        // Reload your enforcer here
+        println!("Policy updated: {}", msg);
+        // Reload your enforcer policies here
     }));
 
-    // Use with your enforcer
-    // let mut enforcer = Enforcer::new("model.conf", "policy.csv")?;
-    // enforcer.set_watcher(Box::new(watcher));
+    // The watcher automatically starts subscription when callback is set
+    // Now you can use it with Casbin enforcer
+    // Your enforcer will be notified when policies change
 
     Ok(())
 }
 ```
 
-## Running Tests
+**Key Features:**
+- **Automatic Subscription**: The watcher starts listening for updates automatically when you set the callback
+- **Thread-Safe**: Built with Rust's safety guarantees and proper synchronization
+- **Synchronous API**: Simple blocking API that handles async operations internally
+- **Casbin Integration**: Implements the `Watcher` trait for seamless integration with Casbin enforcers
 
-### Standalone Redis Tests
+## Cluster Example
 
-```bash
-# Start Redis
-docker run -d -p 6379:6379 redis:latest
+```rust
+use redis_watcher::{RedisWatcher, WatcherOptions};
+use casbin::{prelude::*, Watcher};
 
-# Run tests
-export REDIS_AVAILABLE=true
-cargo test --lib -- --include-ignored
+fn main() -> redis_watcher::Result<()> {
+    let options = WatcherOptions::default()
+        .with_channel("/casbin".to_string())
+        .with_ignore_self(true);
+
+    // Initialize watcher with Redis cluster
+    // Provide comma-separated list of cluster nodes
+    let mut watcher = RedisWatcher::new_cluster(
+        "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002",
+        options
+    )?;
+
+    // Set up callback to handle policy updates
+    watcher.set_update_callback(Box::new(|msg: String| {
+        println!("Received policy update from cluster: {}", msg);
+        // Parse message and reload enforcer policies
+    }));
+
+    // Watcher is now ready to receive cluster-wide policy updates
+    
+    Ok(())
+}
 ```
 
-### Redis Cluster Tests
+**Cluster Features:**
+- **High Availability**: Connects to multiple Redis cluster nodes
+- **Automatic Failover**: Redis cluster handles node failures automatically
+- **Scalability**: Distributes load across cluster nodes
+- **Pub/Sub Support**: Uses dedicated connection for pub/sub operations in cluster mode
 
-```bash
-# Setup Redis Cluster (see CI configuration for detailed setup)
-# Or use the setup script provided
-
-# Run cluster tests
-export REDIS_CLUSTER_AVAILABLE=true
-export REDIS_CLUSTER_URLS=redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002
-cargo test test_redis_cluster -- --ignored
-```
-
-## API
+## Configuration
 
 ### WatcherOptions
 
-Configure the Redis watcher:
+The `WatcherOptions` struct provides configuration for the Redis watcher:
 
 ```rust
+use redis_watcher::WatcherOptions;
+
 let options = WatcherOptions::default()
-    .with_channel("/casbin-policy-updates".to_string())  // Redis pub/sub channel
-    .with_ignore_self(true)                              // Ignore messages from this instance
-    .with_local_id("my-instance".to_string());           // Custom instance ID (auto-generated if not set)
+    .with_channel("/casbin-policy-updates".to_string())  // Redis channel name
+    .with_ignore_self(true)                              // Ignore self-generated updates
+    .with_local_id("unique-instance-id".to_string());    // Unique identifier for this instance
 ```
 
-### RedisWatcher
+**Options Explained:**
 
-Create watchers for standalone Redis or Redis cluster:
+- **`channel`**: Redis pub/sub channel name for policy updates (default: `"/casbin"`)
+- **`ignore_self`**: When `true`, the watcher ignores messages it published itself, preventing circular updates (default: `false`)
+- **`local_id`**: Unique identifier for this watcher instance, automatically generated using UUID v4 if not specified
+
+**Best Practices:**
+- Set `ignore_self` to `true` in production to avoid processing your own updates
+- Use a descriptive `local_id` for easier debugging in multi-instance deployments
+- Choose a channel name that doesn't conflict with other Redis applications
+
+### Update Types
+
+The watcher supports various policy update types through the `UpdateType` enum, which corresponds to different Casbin operations:
 
 ```rust
-// Standalone Redis
-let watcher = RedisWatcher::new("redis://localhost:6379", options)?;
-
-// Redis Cluster (comma-separated node URLs)
-let cluster_urls = "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002";
-let watcher = RedisWatcher::new_cluster(cluster_urls, options)?;
+pub enum UpdateType {
+    Update,                           // Generic update notification
+    UpdateForAddPolicy,               // Single policy addition
+    UpdateForRemovePolicy,            // Single policy removal
+    UpdateForRemoveFilteredPolicy,    // Filtered policy removal
+    UpdateForSavePolicy,              // Complete policy save
+    UpdateForAddPolicies,             // Batch policy addition
+    UpdateForRemovePolicies,          // Batch policy removal
+    UpdateForUpdatePolicy,            // Single policy update
+    UpdateForUpdatePolicies,          // Batch policy update
+}
 ```
 
-### Update Callbacks
+**Message Structure:**
 
-Set a custom callback to handle policy updates:
+Each update is published as a JSON message with the following structure:
 
 ```rust
-watcher.set_update_callback(Box::new(|msg: String| {
-    println!("Policy changed: {}", msg);
-    // Parse the message and reload your enforcer
-}));
+pub struct Message {
+    pub method: UpdateType,       // Type of update
+    pub id: String,               // Sender's local_id
+    pub sec: String,              // Policy section (e.g., "p", "g")
+    pub ptype: String,            // Policy type
+    pub old_rule: Vec<String>,    // Old policy rule
+    pub old_rules: Vec<Vec<String>>,  // Old policy rules (batch)
+    pub new_rule: Vec<String>,    // New policy rule
+    pub new_rules: Vec<Vec<String>>,  // New policy rules (batch)
+    pub field_index: i32,         // Field index for filtered operations
+    pub field_values: Vec<String>, // Field values for filtered operations
+}
 ```
 
-## Features
+**Integration with Casbin:**
 
-- ✅ Compatible with casbin-redis-watcher (Go version)
-- ✅ Support for standalone Redis and Redis Cluster
-- ✅ Synchronous design for easy integration
-- ✅ Automatic policy change notifications via Redis pub/sub
-- ✅ Custom update callbacks
-- ✅ Message filtering (ignore self-generated messages)
-- ✅ Comprehensive error handling with thiserror
-- ✅ Thread-safe design with proper cleanup
-
-## Requirements
-
-- Rust 1.82+
-- Redis 5.0+ (for standalone mode)
-- Redis Cluster 5.0+ (for cluster mode)
-
-## CI/CD
-
-This project includes comprehensive CI/CD pipelines:
-
-- **Unit tests**: Run on all platforms (Linux, macOS, Windows)
-- **Integration tests**: 
-  - Standalone Redis tests on Linux with Redis service
-  - Redis Cluster tests on Linux with 6-node cluster setup
-- **Cross-platform support**: Tested on multiple Rust versions (1.82+, stable)
+The watcher automatically converts Casbin's `EventData` to these message types when you call `watcher.update(event_data)`. This ensures consistent synchronization across all instances.
 
 ## Getting Help
 
-- [Casbin-RS Documentation](https://docs.rs/casbin/)
-- [Redis Documentation](https://redis.io/documentation)
-- [GitHub Issues](https://github.com/casbin/casbin-rs/issues)
+### Documentation
+
+- **API Documentation**: [docs.rs/redis-watcher](https://docs.rs/redis-watcher)
+- **Casbin-RS Documentation**: [Casbin-RS GitHub](https://github.com/casbin/casbin-rs)
+- **Redis Client**: [redis-rs Documentation](https://github.com/redis-rs/redis-rs)
+- **Async Runtime**: [Tokio Documentation](https://tokio.rs)
 
 ## License
 
