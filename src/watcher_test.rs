@@ -14,38 +14,9 @@
 
 //! Redis Watcher Tests
 //!
-//! ## Important: Understanding What These Tests Verify
-//!
-//! These tests verify the **notification mechanism** of the Redis Watcher, NOT complete
-//! policy data synchronization. The watcher's responsibility is to:
-//! - ✅ Publish notifications when policies change
-//! - ✅ Receive notifications from Redis PubSub
-//! - ✅ Invoke callbacks with notification content
-//!
-//! The watcher does NOT:
-//! - ❌ Synchronize actual policy data between enforcers
-//! - ❌ Maintain shared state or a database
-//!
-//! ## Production Architecture
-//!
-//! In production, complete policy synchronization requires THREE components:
-//! 1. **Shared Database** (MySQL/PostgreSQL) - Stores actual policy data
-//! 2. **Redis Watcher** (this component) - Sends/receives change notifications
-//! 3. **Callback Handler** - Reloads policies from shared database when notified
-//!
-//! Flow: E1 saves to DB → E1 notifies via Watcher → E2 receives notification → E2 reloads from DB
-//!
-//! ## Test Environment Note
-//!
-//! These tests use FileAdapter (local CSV files), not a shared database adapter.
-//! Therefore, we only verify:
-//! - ✅ Notifications are sent and received correctly
-//! - ✅ Message content is accurate
-//!
-//! We do NOT verify:
-//! - ❌ Policy data equality between enforcers (requires shared database adapter)
-//!
-//! For more details, see TESTING.md
+//! Tests verify the Redis PubSub notification mechanism for policy updates.
+//! Note: These tests only verify notifications, not complete policy synchronization.
+//! For full synchronization, use a shared database adapter with callbacks.
 
 #[cfg(test)]
 mod tests {
@@ -126,9 +97,7 @@ mod tests {
         assert!(result.is_ok(), "Watcher creation should succeed");
     }
 
-    // ========== Distributed Synchronization Tests ==========
-    // These tests demonstrate how multiple Enforcer instances receive policy update notifications through Redis Watcher
-    // Note: In production, enforcers would share a database adapter and load_policy() would sync from DB
+    // Distributed synchronization tests - verify notification mechanism between enforcers
 
     #[tokio::test]
     async fn test_watcher_notification_on_add_policy() {
@@ -216,7 +185,7 @@ mod tests {
             "Message should contain the policy action"
         );
 
-        println!("✓ test_watcher_notification_on_add_policy passed");
+        println!("test_watcher_notification_on_add_policy passed");
     }
 
     #[tokio::test]
@@ -287,7 +256,7 @@ mod tests {
             "Message should contain the removed policy subject"
         );
 
-        println!("✓ test_watcher_notification_on_remove_policy passed");
+        println!("test_watcher_notification_on_remove_policy passed");
     }
 
     #[tokio::test]
@@ -353,7 +322,7 @@ mod tests {
         assert!(msg.contains("jack"), "Message should contain first policy");
         assert!(msg.contains("katy"), "Message should contain second policy");
 
-        println!("✓ test_watcher_notification_on_add_policies passed");
+        println!("test_watcher_notification_on_add_policies passed");
     }
     #[tokio::test]
     async fn test_three_enforcers_distributed_sync() {
@@ -424,10 +393,10 @@ mod tests {
             "E3 should receive update from E1"
         );
 
-        println!("✓ test_three_enforcers_distributed_sync passed");
+        println!("test_three_enforcers_distributed_sync passed");
     }
 
-    // ========== Ignore Self Behavior Tests ==========
+    // Tests for ignore_self behavior
 
     #[tokio::test]
     async fn test_ignore_self_true() {
@@ -466,7 +435,7 @@ mod tests {
             !*callback_called.lock().unwrap(),
             "Callback should NOT be called when ignore_self=true"
         );
-        println!("✓ test_ignore_self_true passed");
+        println!("test_ignore_self_true passed");
     }
 
     #[tokio::test]
@@ -504,10 +473,10 @@ mod tests {
             *callback_called.lock().unwrap(),
             "Callback SHOULD be called when ignore_self=false"
         );
-        println!("✓ test_ignore_self_false passed");
+        println!("test_ignore_self_false passed");
     }
 
-    // ========== Watcher Trait Implementation Tests ==========
+    // Watcher trait implementation tests
 
     #[tokio::test]
     async fn test_watcher_trait_integration() {
@@ -533,10 +502,10 @@ mod tests {
             vec!["alice".to_string(), "data1".to_string(), "read".to_string()],
         ));
 
-        println!("✓ Watcher trait implementation test passed");
+        println!("Watcher trait implementation test passed");
     }
 
-    // ========== Redis Cluster Tests ==========
+    // Redis Cluster tests
 
     #[tokio::test]
     #[ignore] // Requires Redis Cluster to be running
@@ -546,18 +515,15 @@ mod tests {
             return;
         }
 
-        // ⚠️  CRITICAL: Redis Cluster PubSub messages DO NOT propagate between nodes
+        // CRITICAL: Redis Cluster PubSub messages DO NOT propagate between nodes
         // ALL watcher instances MUST connect to the SAME node for pub/sub to work
         // Use a single node URL instead of multiple nodes
         let pubsub_node = std::env::var("REDIS_CLUSTER_PUBSUB_NODE")
             .unwrap_or_else(|_| "redis://127.0.0.1:7000".to_string());
 
-        println!("╔════════════════════════════════════════════════════════════════╗");
-        println!("║  Redis Cluster PubSub Test Configuration                      ║");
-        println!("╠════════════════════════════════════════════════════════════════╣");
-        println!("║  ⚠️  IMPORTANT: All watchers MUST use the SAME node!          ║");
-        println!("║  PubSub node: {:48} ║", pubsub_node);
-        println!("╚════════════════════════════════════════════════════════════════╝");
+        println!("Redis Cluster PubSub Test Configuration");
+        println!("IMPORTANT: All watchers MUST use the SAME node!");
+        println!("PubSub node: {}", pubsub_node);
 
         let unique_channel = format!("test_cluster_sync_{}", Uuid::new_v4());
         println!("Using unique channel: {}", unique_channel);
@@ -587,7 +553,7 @@ mod tests {
             pubsub_node
         );
 
-        // ✅ CORRECT: Both watchers use the SAME single node URL
+        // [OK] CORRECT: Both watchers use the SAME single node URL
         let mut w1 = RedisWatcher::new_cluster(&pubsub_node, wo1)
             .expect("Failed to create cluster watcher1");
         let mut w2 = RedisWatcher::new_cluster(&pubsub_node, wo2)
@@ -596,7 +562,7 @@ mod tests {
         println!("Waiting for watchers to be ready...");
         w1.wait_for_ready().await;
         w2.wait_for_ready().await;
-        println!("✓ Both cluster watchers are ready");
+        println!("Both cluster watchers are ready");
 
         println!("Setting up callbacks...");
         w1.set_update_callback(Box::new(|msg| {
@@ -635,7 +601,7 @@ mod tests {
             received = *callback_received.lock().unwrap();
             if received {
                 let msg = message_content.lock().unwrap();
-                println!("✓ Callback received after attempt {}: {}", i + 1, msg);
+                println!("Callback received after attempt {}: {}", i + 1, msg);
                 break;
             }
             println!("Waiting for callback... attempt {}/10", i + 1);
@@ -644,7 +610,7 @@ mod tests {
 
         if !received {
             let msg = message_content.lock().unwrap();
-            eprintln!("✗ Failed to receive callback after 10 attempts");
+            eprintln!("Failed to receive callback after 10 attempts");
             eprintln!("Last message content: {}", msg);
             eprintln!("Callback received flag: {}", received);
         }
@@ -657,34 +623,13 @@ mod tests {
              3. Redis Cluster is properly configured\n\
              4. Check logs above for publish/subscribe details\n\
              \n\
-             ⚠️  Remember: Redis Cluster PubSub messages DO NOT propagate between nodes!\n\
+             Remember: Redis Cluster PubSub messages DO NOT propagate between nodes!\n\
              All instances MUST use the SAME node URL for PubSub.",
             pubsub_node, channel_for_error
         );
 
-        // ========== Important Note about Distributed Policy Synchronization ==========
-        //
-        // In production environments, policy synchronization requires a shared database:
-        //
-        // 1. E1 modifies policy → saves to shared DB (MySQL/PostgreSQL/etc.)
-        // 2. E1 sends notification via Redis Watcher
-        // 3. E2 receives notification → reloads policy from shared DB
-        //
-        // This test only verifies that the Redis PubSub notification mechanism works correctly.
-        // The actual policy data synchronization is the responsibility of the shared adapter.
-        //
-        // In this test environment, we're using FileAdapter which loads from local CSV files,
-        // so e2.load_policy() will only reload the original CSV file, not E1's in-memory changes.
-        //
-        // Therefore, we verify:
-        // ✅ E1 successfully adds a new policy
-        // ✅ E2 successfully receives the update notification via Redis PubSub
-        // ❌ We DO NOT verify e1.get_policy() == e2.get_policy() because they use separate file adapters
-        //
-        // For a complete synchronization test, you would need:
-        // - A shared database adapter (e.g., DatabaseAdapter backed by PostgreSQL)
-        // - Both enforcers pointing to the same database
-        // ==========================================================================
+        // Note: This test verifies Redis PubSub notifications only.
+        // For complete policy synchronization, use a shared database adapter with callbacks.
 
         // Verify that E1 has the new policy
         let p1 = e1.get_policy();
@@ -700,7 +645,7 @@ mod tests {
             "E2's received message should contain the new policy subject"
         );
 
-        println!("✓ Redis cluster PubSub notification test passed");
+        println!("Redis cluster PubSub notification test passed");
         println!("  - E1 successfully published policy change");
         println!("  - E2 successfully received notification via Redis Cluster PubSub");
         println!("  - Message content verified to contain correct policy data");

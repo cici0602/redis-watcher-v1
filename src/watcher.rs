@@ -287,51 +287,13 @@ impl RedisWatcher {
 
     /// Create a new Redis watcher for Redis Cluster
     ///
-    /// # ⚠️ IMPORTANT: Redis Cluster PubSub Limitation
-    ///
-    /// Redis Cluster PubSub messages **DO NOT** propagate between cluster nodes.
-    /// All watcher instances **MUST** connect to the **SAME** node for pub/sub to work.
-    ///
-    /// This method uses the **first URL** in the provided list as the fixed PubSub node.
-    /// **ALL instances must use the SAME first URL** or they won't receive each other's messages.
+    /// Note: Redis Cluster PubSub messages don't propagate between nodes.
+    /// All instances MUST connect to the SAME node for pub/sub to work.
+    /// This method uses the first URL as the fixed PubSub node.
     ///
     /// # Arguments
-    /// * `cluster_urls` - Comma-separated Redis URLs. **The first URL will be used for PubSub**.
-    ///   Example: "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002"
+    /// * `cluster_urls` - Comma-separated Redis URLs (first URL used for PubSub)
     /// * `options` - Watcher configuration options
-    ///
-    /// # Example
-    /// ```no_run
-    /// use redis_watcher::{RedisWatcher, WatcherOptions};
-    ///
-    /// // ✅ CORRECT: All instances use the same first URL
-    /// let watcher1 = RedisWatcher::new_cluster(
-    ///     "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002",
-    ///     WatcherOptions::default()
-    /// ).unwrap();
-    ///
-    /// let watcher2 = RedisWatcher::new_cluster(
-    ///     "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002",  // Same first URL!
-    ///     WatcherOptions::default()
-    /// ).unwrap();
-    ///
-    /// // ❌ WRONG: Different first URLs - instances won't communicate!
-    /// // let watcher3 = RedisWatcher::new_cluster(
-    /// //     "redis://127.0.0.1:7001,redis://127.0.0.1:7000",  // Different order
-    /// //     WatcherOptions::default()
-    /// // ).unwrap();
-    /// ```
-    ///
-    /// # Production Recommendation
-    /// For production use, specify a single dedicated node for PubSub:
-    /// ```no_run
-    /// # use redis_watcher::{RedisWatcher, WatcherOptions};
-    /// // All instances use node 7000 for PubSub
-    /// let watcher = RedisWatcher::new_cluster(
-    ///     "redis://127.0.0.1:7000",  // Single node for PubSub
-    ///     WatcherOptions::default()
-    /// ).unwrap();
-    /// ```
     pub fn new_cluster(cluster_urls: &str, options: crate::WatcherOptions) -> Result<Self> {
         // Parse cluster URLs
         let urls: Vec<&str> = cluster_urls.split(',').map(|s| s.trim()).collect();
@@ -350,7 +312,7 @@ impl RedisWatcher {
         })?;
 
         log::warn!(
-            "⚠️  Redis Cluster PubSub using fixed node: {} - ALL instances MUST use the SAME node!",
+            "Redis Cluster PubSub using fixed node: {} - ALL instances MUST use the SAME node!",
             pubsub_url
         );
 
@@ -415,7 +377,7 @@ impl RedisWatcher {
                     match client.publish_message(&channel, payload.clone()).await {
                         Ok(_) => {
                             eprintln!(
-                                "[RedisWatcher] ✓ Successfully published message to channel: {}",
+                                "[RedisWatcher] Successfully published message to channel: {}",
                                 channel
                             );
                             break;
@@ -423,12 +385,12 @@ impl RedisWatcher {
                         Err(e) => {
                             retry_count += 1;
                             eprintln!(
-                                "[RedisWatcher] ⚠️  Failed to publish message (attempt {}): {}",
+                                "[RedisWatcher] Failed to publish message (attempt {}): {}",
                                 retry_count, e
                             );
                             if retry_count >= 3 {
                                 eprintln!(
-                                    "[RedisWatcher] ✗ Failed to publish message after {} attempts: {}",
+                                    "[RedisWatcher] Failed to publish message after {} attempts: {}",
                                     retry_count,
                                     e
                                 );
@@ -442,7 +404,7 @@ impl RedisWatcher {
                     }
                 }
             } else {
-                eprintln!("[RedisWatcher] ✗ Failed to serialize message to JSON");
+                eprintln!("[RedisWatcher] Failed to serialize message to JSON");
             }
         }
     }
@@ -547,7 +509,7 @@ impl RedisWatcher {
                 match pubsub.subscribe(&channel).await {
                     Ok(_) => {
                         eprintln!(
-                            "[RedisWatcher] ✓ Successfully subscribed to channel: {}",
+                            "[RedisWatcher] Successfully subscribed to channel: {}",
                             channel
                         );
                         // Notify that subscription is ready (similar to Go's WaitGroup.Done())
@@ -557,7 +519,7 @@ impl RedisWatcher {
                     Err(e) => {
                         subscribe_retry += 1;
                         eprintln!(
-                            "[RedisWatcher] ⚠️  Failed to subscribe to channel {} (attempt {}): {}",
+                            "[RedisWatcher] Failed to subscribe to channel {} (attempt {}): {}",
                             channel, subscribe_retry, e
                         );
                         if subscribe_retry > 5 {
@@ -585,13 +547,13 @@ impl RedisWatcher {
                         match msg_opt {
                             Some(msg) => {
                                 let payload: String = msg.get_payload().unwrap_or_default();
-                                eprintln!("[RedisWatcher] 📨 Received message on channel {}: {}", channel, payload);
+                                eprintln!("[RedisWatcher] Received message on channel {}: {}", channel, payload);
 
                                 // Parse message and check if we should ignore it
                                 if ignore_self {
                                     if let Ok(parsed_msg) = Message::from_json(&payload) {
                                         if parsed_msg.id == local_id {
-                                            eprintln!("[RedisWatcher] 🚫 Ignoring self message from: {}", parsed_msg.id);
+                                            eprintln!("[RedisWatcher] Ignoring self message from: {}", parsed_msg.id);
                                             continue;
                                         }
                                     }
@@ -600,18 +562,18 @@ impl RedisWatcher {
                                 // Call callback
                                 if let Ok(mut cb_guard) = callback.lock() {
                                     if let Some(ref mut cb) = *cb_guard {
-                                        eprintln!("[RedisWatcher] 🔔 Invoking callback for message");
+                                        eprintln!("[RedisWatcher] Invoking callback for message");
                                         cb(payload);
                                     } else {
-                                        eprintln!("[RedisWatcher] ⚠️  Callback not set, message ignored");
+                                        eprintln!("[RedisWatcher] Callback not set, message ignored");
                                     }
                                 } else {
-                                    eprintln!("[RedisWatcher] ⚠️  Failed to acquire callback lock");
+                                    eprintln!("[RedisWatcher] Failed to acquire callback lock");
                                 }
                             }
                             None => {
                                 // Stream ended
-                                eprintln!("[RedisWatcher] ⚠️  Pubsub stream ended");
+                                eprintln!("[RedisWatcher] Pubsub stream ended");
                                 break;
                             }
                         }

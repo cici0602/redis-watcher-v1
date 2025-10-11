@@ -1,71 +1,15 @@
 Redis Watcher
 ---
 
+# test tag
+
 [![Crates.io](https://img.shields.io/crates/v/redis-watcher.svg)](https://crates.io/crates/redis-watcher)
 [![Docs](https://docs.rs/redis-watcher/badge.svg)](https://docs.rs/redis-watcher)
 [![Build Status](https://github.com/casbin-rs/redis-watcher/actions/workflows/ci.yml/badge.svg)](https://github.com/casbin-rs/redis-watcher/actions/workflows/ci.yml)
 [![Codecov](https://codecov.io/gh/casbin-rs/redis-watcher/branch/master/graph/badge.svg)](https://codecov.io/gh/casbin-rs/redis-watcher)
 
-> **✨ 最新更新**: 完成重大架构重构，现在完全支持分布式环境中的多实例同步！详见 [REFACTORING_COMPLETE.md](./REFACTORING_COMPLETE.md)
 
 Redis Watcher is a [Redis](http://redis.io) watcher for [Casbin-RS](https://github.com/casbin/casbin-rs).
-
-## 🎯 What is Redis Watcher?
-
-**Redis Watcher is a notification mechanism for distributed Casbin policy synchronization.**
-
-### What it Does ✅
-- **Publishes** notifications when policies change in one enforcer instance
-- **Receives** notifications via Redis PubSub when other instances change policies
-- **Invokes** callbacks to alert your application of policy changes
-
-### What it Does NOT Do ❌
-- **Does NOT synchronize** the actual policy data between instances
-- **Does NOT store** policies in Redis or any database
-- **Does NOT replace** your database adapter
-
-### How it Works 🔄
-
-In a distributed system with multiple Casbin instances:
-
-```
-┌──────────────┐                           ┌──────────────┐
-│  Enforcer 1  │                           │  Enforcer 2  │
-└──────┬───────┘                           └──────┬───────┘
-       │ 1. Save to DB                            │
-       ▼                                          │
-┌────────────────────────────────────────────────┴──────┐
-│     Shared Database (MySQL/PostgreSQL/SQLite)         │
-│              (Your DatabaseAdapter)                   │
-└────────────────────────────────────────────────────────┘
-       │                                          ▲
-       │ 2. Notify via Watcher                   │
-       ▼                                          │
-┌──────────────────────────────────────────────────────┐
-│          Redis PubSub (Redis Watcher)                │
-│             👈 THIS COMPONENT                        │
-└──────────────────────────────────────────────────────┘
-       │                                          │
-       └─ 3. Notify E2 ──────── 4. Reload ───────┘
-```
-
-**Complete Flow:**
-1. **Enforcer 1** modifies policy → saves to shared database (via DatabaseAdapter)
-2. **Enforcer 1** publishes notification → via Redis Watcher
-3. **Enforcer 2** receives notification → via Redis Watcher callback
-4. **Enforcer 2** reloads policies → from shared database (via DatabaseAdapter)
-
-**Key Point:** You need **BOTH**:
-- A **shared database adapter** (for actual policy data)
-- **Redis Watcher** (for change notifications)
-
-## ✨ 核心特性
-
-- ✅ **真正的分布式支持** - 可以在同一进程或不同进程中创建多个实例，自动同步策略
-- ✅ **异步优先设计** - 完全基于 tokio，非阻塞，高性能
-- ✅ **Redis & Redis Cluster** - 支持单机和集群模式
-- ✅ **灵活的消息过滤** - 支持 `ignore_self` 避免接收自己的更新
-- ✅ **完整的测试覆盖** - 包含多实例同步测试
 
 ## Installation
 
@@ -74,9 +18,9 @@ Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
 redis-watcher = "0.1.0"
-casbin = { version = "2.13", features = ["watcher"] }
+casbin = { version = "2.13.0", features = ["watcher"] }
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "time"] }
-redis = { version = "0.32", features = ["tokio-comp", "cluster-async", "aio"] }
+redis = { version = "0.32.6", features = ["tokio-comp", "cluster-async", "aio"] }
 ```
 
 **Note**: The `watcher` feature is required for Casbin to enable watcher functionality. For Redis cluster support, include the `cluster-async` feature.
@@ -110,12 +54,6 @@ fn main() -> redis_watcher::Result<()> {
 }
 ```
 
-**Key Features:**
-- **Automatic Subscription**: The watcher starts listening for updates automatically when you set the callback
-- **Thread-Safe**: Built with Rust's safety guarantees and proper synchronization
-- **Synchronous API**: Simple blocking API that handles async operations internally
-- **Casbin Integration**: Implements the `Watcher` trait for seamless integration with Casbin enforcers
-
 ## Cluster Example
 
 ```rust
@@ -128,10 +66,9 @@ fn main() -> redis_watcher::Result<()> {
         .with_ignore_self(true);
 
     // Initialize watcher with Redis cluster
-    // ⚠️ IMPORTANT: All instances MUST use the same first URL for PubSub!
+    // Provide comma-separated list of cluster nodes
     let mut watcher = RedisWatcher::new_cluster(
-        "redis://127.0.0.1:7000",  // Single node for PubSub (recommended)
-        // or: "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002"
+        "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002",
         options
     )?;
 
@@ -146,63 +83,6 @@ fn main() -> redis_watcher::Result<()> {
     Ok(())
 }
 ```
-
-**Cluster Features:**
-- **High Availability**: Connects to Redis cluster for resilience
-- **Automatic Failover**: Redis cluster handles node failures
-- **Scalability**: Supports distributed deployments
-
-**⚠️ CRITICAL: Redis Cluster PubSub Limitation**
-
-Redis Cluster PubSub messages **DO NOT** propagate across cluster nodes. This is a fundamental limitation of Redis Cluster architecture.
-
-**What this means:**
-- A message published to node A will **only** be received by subscribers connected to node A
-- Subscribers connected to node B or C will **not** receive the message
-- This is **not a bug** - it's how Redis Cluster PubSub works
-
-**Solution:**
-
-All watcher instances **must connect to the same Redis node** for PubSub operations:
-
-```rust
-// ✅ CORRECT: All instances use the same node (7000)
-let pubsub_node = "redis://127.0.0.1:7000";
-
-// Instance 1 (could be in process A, server X)
-let watcher1 = RedisWatcher::new_cluster(pubsub_node, options1)?;
-
-// Instance 2 (could be in process B, server Y)
-let watcher2 = RedisWatcher::new_cluster(pubsub_node, options2)?;
-
-// ❌ WRONG: Different first nodes - messages won't be received!
-let watcher3 = RedisWatcher::new_cluster("redis://127.0.0.1:7001", options3)?;  // Won't work!
-```
-
-**How it works:**
-- The `new_cluster()` method uses the **first URL** in your list as the fixed PubSub node
-- All publish and subscribe operations use this single node
-- Data operations can still use the full cluster (this is just for PubSub)
-
-**Production Recommendations:**
-
-1. **Dedicated PubSub Node**: Use a single, stable Redis node for PubSub
-   ```rust
-   let watcher = RedisWatcher::new_cluster("redis://pubsub-node:7000", options)?;
-   ```
-
-2. **High Availability**: Put the PubSub node behind a load balancer or use Redis Sentinel for failover
-
-3. **Monitoring**: Monitor the PubSub node's health carefully as it's a single point of communication
-
-4. **Environment Variable**: Configure the PubSub node via environment variable for flexibility
-   ```rust
-   let pubsub_node = std::env::var("REDIS_PUBSUB_NODE")
-       .unwrap_or_else(|_| "redis://127.0.0.1:7000".to_string());
-   let watcher = RedisWatcher::new_cluster(&pubsub_node, options)?;
-   ```
-
-For detailed technical explanation, see [CLUSTER_PUBSUB_ANALYSIS.md](./CLUSTER_PUBSUB_ANALYSIS.md).
 
 ## Configuration
 
