@@ -3,10 +3,10 @@ Redis Watcher
 
 # test tag
 
-[![Crates.io](https://img.shields.io/crates/v/redis-watcher.svg)](https://crates.io/crates/redis-watcher)
-[![Docs](https://docs.rs/redis-watcher/badge.svg)](https://docs.rs/redis-watcher)
-[![Build Status](https://github.com/casbin-rs/redis-watcher/actions/workflows/ci.yml/badge.svg)](https://github.com/casbin-rs/redis-watcher/actions/workflows/ci.yml)
-[![Codecov](https://codecov.io/gh/casbin-rs/redis-watcher/branch/master/graph/badge.svg)](https://codecov.io/gh/casbin-rs/redis-watcher)
+[![Crates.io](https://img.shields.io/crates/v/redis-watcher-temp.svg)](https://crates.io/crates/redis-watcher-temp)
+[![Docs](https://docs.rs/redis-watcher-temp/badge.svg)](https://docs.rs/redis-watcher-temp)
+[![Build Status](https://github.com/cici0602/redis-watcher-v1/actions/workflows/ci.yml/badge.svg)](https://github.com/cici0602/redis-watcher-v1/actions/workflows/ci.yml)
+[![Codecov](https://codecov.io/gh/cici0602/redis-watcher-v1/branch/master/graph/badge.svg)](https://codecov.io/gh/cici0602/redis-watcher-v1)
 
 
 Redis Watcher is a [Redis](http://redis.io) watcher for [Casbin-RS](https://github.com/casbin/casbin-rs).
@@ -17,10 +17,10 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-redis-watcher = "0.1.0"
-casbin = { version = "2.13", features = ["watcher"] }
+redis-watcher-temp = "0.1.0"
+casbin = { version = "2.13.0", features = ["watcher"] }
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "time"] }
-redis = { version = "0.32", features = ["tokio-comp", "cluster-async", "aio"] }
+redis = { version = "0.32.6", features = ["tokio-comp", "cluster-async", "aio"] }
 ```
 
 **Note**: The `watcher` feature is required for Casbin to enable watcher functionality. For Redis cluster support, include the `cluster-async` feature.
@@ -54,12 +54,6 @@ fn main() -> redis_watcher::Result<()> {
 }
 ```
 
-**Key Features:**
-- **Automatic Subscription**: The watcher starts listening for updates automatically when you set the callback
-- **Thread-Safe**: Built with Rust's safety guarantees and proper synchronization
-- **Synchronous API**: Simple blocking API that handles async operations internally
-- **Casbin Integration**: Implements the `Watcher` trait for seamless integration with Casbin enforcers
-
 ## Cluster Example
 
 ```rust
@@ -89,12 +83,6 @@ fn main() -> redis_watcher::Result<()> {
     Ok(())
 }
 ```
-
-**Cluster Features:**
-- **High Availability**: Connects to multiple Redis cluster nodes
-- **Automatic Failover**: Redis cluster handles node failures automatically
-- **Scalability**: Distributes load across cluster nodes
-- **Pub/Sub Support**: Uses dedicated connection for pub/sub operations in cluster mode
 
 ## Configuration
 
@@ -167,7 +155,7 @@ The watcher automatically converts Casbin's `EventData` to these message types w
 
 ### Documentation
 
-- **API Documentation**: [docs.rs/redis-watcher](https://docs.rs/redis-watcher)
+- **API Documentation**: [docs.rs/redis-watcher-temp](https://docs.rs/redis-watcher-temp)
 - **Casbin-RS Documentation**: [Casbin-RS GitHub](https://github.com/casbin/casbin-rs)
 - **Redis Client**: [redis-rs Documentation](https://github.com/redis-rs/redis-rs)
 - **Async Runtime**: [Tokio Documentation](https://tokio.rs)
