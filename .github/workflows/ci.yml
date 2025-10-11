@@ -108,6 +108,9 @@ jobs:
           cargo install cargo-audit
           cargo audit
 
+      - name: List available tests
+        run: cargo test --list
+
       - name: Run unit tests
         run: cargo test --verbose --lib
 
@@ -125,11 +128,8 @@ jobs:
           # Set environment variable to indicate Redis cluster is available
           export REDIS_CLUSTER_AVAILABLE=true
           export REDIS_CLUSTER_URLS=redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002
-          # Run all cluster tests
-          cargo test test_redis_cluster_watcher_creation --verbose -- --ignored
-          cargo test test_redis_cluster_watcher_callback --verbose -- --ignored
-          cargo test test_redis_cluster_multiple_watchers --verbose -- --ignored
-          cargo test test_cluster_failover --verbose -- --ignored
+          # Run the actual cluster test that exists in the code
+          cargo test test_redis_cluster_enforcer_sync --verbose -- --ignored
 
   test-cross-platform:
     name: Cross-platform Test Suite
@@ -171,6 +171,9 @@ jobs:
 
       - name: Build
         run: cargo build --verbose --all-features
+
+      - name: List available tests
+        run: cargo test --list
 
       - name: Run unit tests
         run: cargo test --verbose --lib
