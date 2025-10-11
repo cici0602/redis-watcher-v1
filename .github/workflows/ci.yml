@@ -2,69 +2,57 @@ name: CI
 
 on:
   push:
-    branches:
-      - master
+    branches: [master]
   pull_request:
-    branches:
-      - master
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  test-linux:
-    name: Test Suite (Linux with Redis)
+  lint:
+    name: Lint & Format
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt -- --check
+      - run: cargo clippy -- -D warnings
+
+  test-linux:
+    name: Test (Linux + Redis)
+    runs-on: ubuntu-latest
+    needs: lint
     strategy:
-      fail-fast: false
       matrix:
-        rust-version: ['1.82', 'stable']
+        rust: ['1.82', 'stable']
         redis-mode: ['standalone', 'cluster']
 
     services:
-      # Redis service is only available on Linux runners
       redis:
-        image: redis
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+        image: redis:alpine
+        ports: [6379:6379]
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ matrix.rust-version }}
-          components: rustfmt, clippy
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ matrix.rust-version }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.rust-version }}-
-            ${{ runner.os }}-cargo-
+          toolchain: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
 
       - name: Setup Redis Cluster
         if: matrix.redis-mode == 'cluster'
         run: |
-          # Install redis-server and redis-cli for cluster setup
-          sudo apt-get update
-          sudo apt-get install -y redis-server redis-tools
+          sudo apt-get update && sudo apt-get install -y redis-server redis-tools
+          mkdir -p /tmp/redis-cluster/{7000,7001,7002,7003,7004,7005}
           
-          # Create Redis cluster configuration
-          mkdir -p /tmp/redis-cluster
+          # Create cluster nodes
           for port in 7000 7001 7002 7003 7004 7005; do
-            mkdir -p /tmp/redis-cluster/$port
-            cat > /tmp/redis-cluster/$port/redis.conf << EOF
+            cat > /tmp/redis-cluster/$port/redis.conf <<EOF
           port $port
           cluster-enabled yes
           cluster-config-file nodes-$port.conf
@@ -73,107 +61,50 @@ jobs:
           bind 0.0.0.0
           protected-mode no
           EOF
-          done
-          
-          # Start Redis cluster nodes
-          for port in 7000 7001 7002 7003 7004 7005; do
             redis-server /tmp/redis-cluster/$port/redis.conf --daemonize yes --dir /tmp/redis-cluster/$port/
           done
           
-          # Wait for nodes to start
           sleep 10
+          echo "yes" | redis-cli --cluster create 127.0.0.1:{7000,7001,7002,7003,7004,7005} --cluster-replicas 1
+
+      - name: Build and Test
+        run: |
+          cargo build --all-features
+          cargo test --lib
           
-          # Create cluster
-          echo "yes" | redis-cli --cluster create \
-            127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 \
-            127.0.0.1:7003 127.0.0.1:7004 127.0.0.1:7005 \
-            --cluster-replicas 1
-          
-          # Verify cluster status
-          redis-cli -p 7000 cluster info
-          redis-cli -p 7000 cluster nodes
+      - name: Run Integration Tests
+        env:
+          REDIS_AVAILABLE: ${{ matrix.redis-mode == 'standalone' }}
+          REDIS_URL: redis://127.0.0.1:6379
+          REDIS_CLUSTER_AVAILABLE: ${{ matrix.redis-mode == 'cluster' }}
+          REDIS_CLUSTER_URLS: redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002
+        run: |
+          if [ "${{ matrix.redis-mode }}" = "standalone" ]; then
+            cargo test --lib -- --include-ignored
+          elif [ "${{ matrix.redis-mode }}" = "cluster" ]; then
+            cargo test test_redis_cluster_enforcer_sync -- --ignored
+          fi
 
-      - name: Check formatting
-        run: cargo fmt -- --check
-
-      - name: Run clippy
-        run: cargo clippy -- -D warnings
-
-      - name: Build
-        run: cargo build --verbose --all-features
-
-      - name: Run security audit
-        if: matrix.rust-version == 'stable'
+      - name: Security Audit
+        if: matrix.rust == 'stable'
         run: |
           cargo install cargo-audit
           cargo audit
 
-      - name: List available tests
-        run: cargo test --list
-
-      - name: Run unit tests
-        run: cargo test --verbose --lib
-
-      - name: Run Redis standalone integration tests
-        if: matrix.redis-mode == 'standalone'
-        run: |
-          # Set environment variable to indicate Redis is available
-          export REDIS_AVAILABLE=true
-          export REDIS_URL=redis://127.0.0.1:6379
-          cargo test --verbose --lib -- --include-ignored
-
-      - name: Run Redis cluster integration tests
-        if: matrix.redis-mode == 'cluster'
-        run: |
-          # Set environment variable to indicate Redis cluster is available
-          export REDIS_CLUSTER_AVAILABLE=true
-          export REDIS_CLUSTER_URLS=redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002
-          # Run the actual cluster test that exists in the code
-          cargo test test_redis_cluster_enforcer_sync --verbose -- --ignored
-
   test-cross-platform:
-    name: Cross-platform Test Suite
+    name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    needs: lint
     strategy:
-      fail-fast: false
       matrix:
-        os: [windows-latest, macOS-latest]
-        rust-version: ['1.82', 'stable']
+        os: [windows-latest, macos-latest]
+        rust: ['1.82', 'stable']
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ matrix.rust-version }}
-          components: rustfmt, clippy
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ matrix.rust-version }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.rust-version }}-
-            ${{ runner.os }}-cargo-
-
-      - name: Check formatting
-        run: cargo fmt -- --check
-
-      - name: Run clippy
-        run: cargo clippy -- -D warnings
-
-      - name: Build
-        run: cargo build --verbose --all-features
-
-      - name: List available tests
-        run: cargo test --list
-
-      - name: Run unit tests
-        run: cargo test --verbose --lib
+          toolchain: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-features
+      - run: cargo test --lib
