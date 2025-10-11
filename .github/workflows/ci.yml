@@ -94,7 +94,7 @@ jobs:
             echo "Checking cluster status..."
             redis-cli -p 7000 cluster nodes || echo "Warning: Could not get cluster status"
             echo "Running cluster test..."
-            timeout 300s cargo test test_redis_cluster_enforcer_sync -- --ignored --nocapture
+            timeout 300s cargo test test_redis_cluster_pubsub_notification -- --ignored --nocapture
           fi
 
       - name: Security Audit
