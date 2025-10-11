@@ -55,24 +55,22 @@ mod tests {
         let cluster_urls = std::env::var("REDIS_CLUSTER_URLS").unwrap_or_else(|_| {
             "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002".to_string()
         });
-        
+
         let urls: Vec<&str> = cluster_urls.split(',').map(|s| s.trim()).collect();
         println!("Checking Redis Cluster availability with URLs: {:?}", urls);
-        
+
         if let Ok(client) = redis::cluster::ClusterClient::builder(urls).build() {
             match client.get_async_connection().await {
-                Ok(mut conn) => {
-                    match redis::cmd("PING").query_async::<String>(&mut conn).await {
-                        Ok(response) => {
-                            println!("Redis Cluster PING response: {}", response);
-                            true
-                        }
-                        Err(e) => {
-                            println!("Redis Cluster PING failed: {}", e);
-                            false
-                        }
+                Ok(mut conn) => match redis::cmd("PING").query_async::<String>(&mut conn).await {
+                    Ok(response) => {
+                        println!("Redis Cluster PING response: {}", response);
+                        true
                     }
-                }
+                    Err(e) => {
+                        println!("Redis Cluster PING failed: {}", e);
+                        false
+                    }
+                },
                 Err(e) => {
                     println!("Failed to connect to Redis Cluster: {}", e);
                     false
@@ -569,7 +567,7 @@ mod tests {
 
         assert!(
             received,
-            "Cluster E2 should receive update notification after {} attempts", 
+            "Cluster E2 should receive update notification after {} attempts",
             if received { "some" } else { "10" }
         );
 

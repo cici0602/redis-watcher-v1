@@ -359,7 +359,7 @@ impl RedisWatcher {
 
             if let Ok(payload) = message.to_json() {
                 log::debug!("Publishing message to channel {}: {}", channel, payload);
-                
+
                 // Retry publishing with exponential backoff
                 let mut retry_count = 0;
                 loop {
@@ -370,12 +370,23 @@ impl RedisWatcher {
                         }
                         Err(e) => {
                             retry_count += 1;
-                            log::warn!("Failed to publish message (attempt {}): {}", retry_count, e);
+                            log::warn!(
+                                "Failed to publish message (attempt {}): {}",
+                                retry_count,
+                                e
+                            );
                             if retry_count >= 3 {
-                                log::error!("Failed to publish message after {} attempts: {}", retry_count, e);
+                                log::error!(
+                                    "Failed to publish message after {} attempts: {}",
+                                    retry_count,
+                                    e
+                                );
                                 break;
                             }
-                            tokio::time::sleep(tokio::time::Duration::from_millis(100 * retry_count)).await;
+                            tokio::time::sleep(tokio::time::Duration::from_millis(
+                                100 * retry_count,
+                            ))
+                            .await;
                         }
                     }
                 }
@@ -441,11 +452,16 @@ impl RedisWatcher {
                     Ok(p) => break p,
                     Err(e) => {
                         retry_count += 1;
-                        log::warn!("Failed to get async pubsub (attempt {}): {}", retry_count, e);
+                        log::warn!(
+                            "Failed to get async pubsub (attempt {}): {}",
+                            retry_count,
+                            e
+                        );
                         if retry_count > 5 {
                             return Err(e);
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_millis(1000 * retry_count)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(1000 * retry_count))
+                            .await;
                     }
                 }
             };
@@ -464,11 +480,19 @@ impl RedisWatcher {
                     }
                     Err(e) => {
                         subscribe_retry += 1;
-                        log::warn!("Failed to subscribe to channel {} (attempt {}): {}", channel, subscribe_retry, e);
+                        log::warn!(
+                            "Failed to subscribe to channel {} (attempt {}): {}",
+                            channel,
+                            subscribe_retry,
+                            e
+                        );
                         if subscribe_retry > 5 {
                             return Err(e);
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_millis(500 * subscribe_retry)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            500 * subscribe_retry,
+                        ))
+                        .await;
                     }
                 }
             }
@@ -536,14 +560,14 @@ impl RedisWatcher {
 impl Watcher for RedisWatcher {
     fn set_update_callback(&mut self, cb: Box<dyn FnMut(String) + Send + Sync>) {
         *self.callback.lock().unwrap() = Some(cb);
-        
+
         // Stop existing subscription task if any
         if let Ok(mut handle_guard) = self.subscription_task.lock() {
             if let Some(handle) = handle_guard.take() {
                 handle.abort();
             }
         }
-        
+
         // Start subscription when callback is set
         let _ = self.start_subscription();
     }
