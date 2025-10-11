@@ -83,18 +83,23 @@ jobs:
           RUST_LOG: debug
         run: |
           if [ "${{ matrix.redis-mode }}" = "standalone" ]; then
-            cargo test --lib -- --include-ignored
+            echo "Running Standalone Redis Tests"
+            echo "Redis URL: $REDIS_URL"
+            echo "Note: Cluster-specific tests will be skipped"
+            echo ""
+            # Run all non-ignored tests (cluster tests are marked with #[ignore])
+            cargo test --lib
           elif [ "${{ matrix.redis-mode }}" = "cluster" ]; then
-            echo "╔════════════════════════════════════════════════════════════════╗"
-            echo "║  Redis Cluster PubSub Configuration                           ║"
-            echo "╠════════════════════════════════════════════════════════════════╣"
-            echo "║  PubSub Node: $REDIS_CLUSTER_PUBSUB_NODE                      ║"
-            echo "║  ⚠️  All instances MUST use the SAME node for PubSub!         ║"
-            echo "╚════════════════════════════════════════════════════════════════╝"
+            echo "Running Redis Cluster Tests"
+            echo "PubSub Node: $REDIS_CLUSTER_PUBSUB_NODE"
+            echo "Note: All instances MUST use the SAME node for PubSub"
+            echo ""
             echo "Checking cluster status..."
             redis-cli -p 7000 cluster nodes || echo "Warning: Could not get cluster status"
-            echo "Running cluster test..."
-            timeout 300s cargo test test_redis_cluster_pubsub_notification -- --ignored --nocapture
+            echo ""
+            echo "Running all tests including cluster-specific tests..."
+            # Run all tests including ignored ones (cluster tests)
+            timeout 300s cargo test --lib -- --include-ignored --nocapture
           fi
 
       - name: Security Audit
