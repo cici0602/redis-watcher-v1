@@ -22,10 +22,10 @@
 //! ## Standalone Redis
 //!
 //! ```rust,no_run
-//! use redis_watcher_temp::{RedisWatcher, WatcherOptions};
+//! use redis_watcher::{RedisWatcher, WatcherOptions};
 //! use casbin::prelude::*;
 //!
-//! fn main() -> redis_watcher_temp::Result<()> {
+//! fn main() -> redis_watcher::Result<()> {
 //!     let options = WatcherOptions::default()
 //!         .with_channel("/casbin-policy-updates".to_string())
 //!         .with_ignore_self(true);
@@ -49,10 +49,10 @@
 //! ## Redis Cluster
 //!
 //! ```rust,no_run
-//! use redis_watcher_temp::{RedisWatcher, WatcherOptions};
+//! use redis_watcher::{RedisWatcher, WatcherOptions};
 //! use casbin::prelude::*;
 //!
-//! fn main() -> redis_watcher_temp::Result<()> {
+//! fn main() -> redis_watcher::Result<()> {
 //!     let options = WatcherOptions::default()
 //!         .with_channel("/casbin-policy-updates".to_string())
 //!         .with_ignore_self(true);
