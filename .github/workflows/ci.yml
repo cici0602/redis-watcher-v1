@@ -78,11 +78,16 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6379
           REDIS_CLUSTER_AVAILABLE: ${{ matrix.redis-mode == 'cluster' }}
           REDIS_CLUSTER_URLS: redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002
+          RUST_LOG: debug
         run: |
           if [ "${{ matrix.redis-mode }}" = "standalone" ]; then
             cargo test --lib -- --include-ignored
           elif [ "${{ matrix.redis-mode }}" = "cluster" ]; then
-            cargo test test_redis_cluster_enforcer_sync -- --ignored
+            echo "Testing Redis Cluster with URLs: $REDIS_CLUSTER_URLS"
+            echo "Checking cluster status..."
+            redis-cli -p 7000 cluster nodes || echo "Warning: Could not get cluster status"
+            echo "Running cluster test..."
+            timeout 300s cargo test test_redis_cluster_enforcer_sync -- --ignored --nocapture
           fi
 
       - name: Security Audit

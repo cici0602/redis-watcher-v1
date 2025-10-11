@@ -358,9 +358,29 @@ impl RedisWatcher {
             }
 
             if let Ok(payload) = message.to_json() {
-                if let Err(e) = client.publish_message(&channel, payload).await {
-                    log::error!("Failed to publish message: {}", e);
+                log::debug!("Publishing message to channel {}: {}", channel, payload);
+                
+                // Retry publishing with exponential backoff
+                let mut retry_count = 0;
+                loop {
+                    match client.publish_message(&channel, payload.clone()).await {
+                        Ok(_) => {
+                            log::debug!("Successfully published message to channel: {}", channel);
+                            break;
+                        }
+                        Err(e) => {
+                            retry_count += 1;
+                            log::warn!("Failed to publish message (attempt {}): {}", retry_count, e);
+                            if retry_count >= 3 {
+                                log::error!("Failed to publish message after {} attempts: {}", retry_count, e);
+                                break;
+                            }
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100 * retry_count)).await;
+                        }
+                    }
                 }
+            } else {
+                log::error!("Failed to serialize message to JSON");
             }
         }
     }
@@ -410,20 +430,48 @@ impl RedisWatcher {
         callback: CallbackArc,
     ) {
         let result = async {
-            let mut pubsub = match client.get_async_pubsub().await {
-                Ok(p) => p,
-                Err(e) => {
-                    log::error!("Failed to get async pubsub: {}", e);
-                    return Err(e);
+            // Retry connection with backoff
+            let mut retry_count = 0;
+            let mut pubsub = loop {
+                if is_closed.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+
+                match client.get_async_pubsub().await {
+                    Ok(p) => break p,
+                    Err(e) => {
+                        retry_count += 1;
+                        log::warn!("Failed to get async pubsub (attempt {}): {}", retry_count, e);
+                        if retry_count > 5 {
+                            return Err(e);
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_millis(1000 * retry_count)).await;
+                    }
                 }
             };
 
-            if let Err(e) = pubsub.subscribe(&channel).await {
-                log::error!("Failed to subscribe to channel {}: {}", channel, e);
-                return Err(e);
-            }
+            // Subscribe with retry
+            let mut subscribe_retry = 0;
+            loop {
+                if is_closed.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
 
-            log::debug!("Successfully subscribed to channel: {}", channel);
+                match pubsub.subscribe(&channel).await {
+                    Ok(_) => {
+                        log::debug!("Successfully subscribed to channel: {}", channel);
+                        break;
+                    }
+                    Err(e) => {
+                        subscribe_retry += 1;
+                        log::warn!("Failed to subscribe to channel {} (attempt {}): {}", channel, subscribe_retry, e);
+                        if subscribe_retry > 5 {
+                            return Err(e);
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500 * subscribe_retry)).await;
+                    }
+                }
+            }
 
             let mut stream = pubsub.on_message();
 
@@ -439,11 +487,13 @@ impl RedisWatcher {
                         match msg_opt {
                             Some(msg) => {
                                 let payload: String = msg.get_payload().unwrap_or_default();
+                                log::debug!("Received message on channel {}: {}", channel, payload);
 
                                 // Parse message and check if we should ignore it
                                 if ignore_self {
                                     if let Ok(parsed_msg) = Message::from_json(&payload) {
                                         if parsed_msg.id == local_id {
+                                            log::debug!("Ignoring self message from: {}", parsed_msg.id);
                                             continue;
                                         }
                                     }
@@ -454,6 +504,8 @@ impl RedisWatcher {
                                     if let Some(ref mut cb) = *cb_guard {
                                         cb(payload);
                                     }
+                                } else {
+                                    log::warn!("Failed to acquire callback lock");
                                 }
                             }
                             None => {
@@ -484,6 +536,14 @@ impl RedisWatcher {
 impl Watcher for RedisWatcher {
     fn set_update_callback(&mut self, cb: Box<dyn FnMut(String) + Send + Sync>) {
         *self.callback.lock().unwrap() = Some(cb);
+        
+        // Stop existing subscription task if any
+        if let Ok(mut handle_guard) = self.subscription_task.lock() {
+            if let Some(handle) = handle_guard.take() {
+                handle.abort();
+            }
+        }
+        
         // Start subscription when callback is set
         let _ = self.start_subscription();
     }

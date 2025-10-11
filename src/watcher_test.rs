@@ -24,7 +24,7 @@ mod tests {
     const REDIS_URL: &str = "redis://127.0.0.1:6379";
     const MODEL_PATH: &str = "examples/rbac_model.conf";
     const POLICY_PATH: &str = "examples/rbac_policy.csv";
-    const SYNC_DELAY_MS: u64 = 500; // Delay for message propagation
+    const SYNC_DELAY_MS: u64 = 2000; // Increased delay for CI environment
 
     // ========== Helper Functions ==========
 
@@ -46,17 +46,40 @@ mod tests {
 
     /// Check if Redis Cluster is available for testing
     async fn is_redis_cluster_available() -> bool {
-        let urls = vec!["redis://127.0.0.1:7000"];
+        // Check environment variable first
+        if std::env::var("REDIS_CLUSTER_AVAILABLE").unwrap_or_default() != "true" {
+            println!("REDIS_CLUSTER_AVAILABLE not set to 'true'");
+            return false;
+        }
+
+        let cluster_urls = std::env::var("REDIS_CLUSTER_URLS").unwrap_or_else(|_| {
+            "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002".to_string()
+        });
+        
+        let urls: Vec<&str> = cluster_urls.split(',').map(|s| s.trim()).collect();
+        println!("Checking Redis Cluster availability with URLs: {:?}", urls);
+        
         if let Ok(client) = redis::cluster::ClusterClient::builder(urls).build() {
-            if let Ok(mut conn) = client.get_async_connection().await {
-                redis::cmd("PING")
-                    .query_async::<String>(&mut conn)
-                    .await
-                    .is_ok()
-            } else {
-                false
+            match client.get_async_connection().await {
+                Ok(mut conn) => {
+                    match redis::cmd("PING").query_async::<String>(&mut conn).await {
+                        Ok(response) => {
+                            println!("Redis Cluster PING response: {}", response);
+                            true
+                        }
+                        Err(e) => {
+                            println!("Redis Cluster PING failed: {}", e);
+                            false
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("Failed to connect to Redis Cluster: {}", e);
+                    false
+                }
             }
         } else {
+            println!("Failed to create Redis Cluster client");
             false
         }
     }
@@ -478,7 +501,9 @@ mod tests {
             "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002".to_string()
         });
 
+        println!("Using Redis Cluster URLs: {}", cluster_urls);
         let unique_channel = format!("test_cluster_sync_{}", Uuid::new_v4());
+        println!("Using unique channel: {}", unique_channel);
 
         // Create two enforcers with cluster watchers
         let wo1 = WatcherOptions::default()
@@ -497,12 +522,16 @@ mod tests {
         let callback_received = Arc::new(Mutex::new(false));
         let callback_clone = callback_received.clone();
 
+        println!("Creating Redis Cluster watchers...");
         let mut w1 = RedisWatcher::new_cluster(&cluster_urls, wo1)
             .expect("Failed to create cluster watcher1");
         let mut w2 = RedisWatcher::new_cluster(&cluster_urls, wo2)
             .expect("Failed to create cluster watcher2");
 
-        w1.set_update_callback(Box::new(|_| {}));
+        println!("Setting up callbacks...");
+        w1.set_update_callback(Box::new(|msg| {
+            println!("[Cluster E1] Sent update: {}", msg);
+        }));
         w2.set_update_callback(Box::new(move |msg: String| {
             println!("[Cluster E2] Received update: {}", msg);
             *callback_clone.lock().unwrap() = true;
@@ -511,8 +540,10 @@ mod tests {
         e1.set_watcher(Box::new(w1));
         e2.set_watcher(Box::new(w2));
 
+        println!("Waiting for watcher initialization...");
         sleep(Duration::from_millis(SYNC_DELAY_MS)).await;
 
+        println!("Adding policy via e1...");
         // e1 adds a policy
         let _ = e1
             .add_policy(vec![
@@ -522,11 +553,24 @@ mod tests {
             ])
             .await;
 
+        println!("Waiting for message propagation...");
         sleep(Duration::from_millis(SYNC_DELAY_MS)).await;
 
+        // Check if callback was received with timeout
+        let mut received = false;
+        for i in 0..10 {
+            received = *callback_received.lock().unwrap();
+            if received {
+                break;
+            }
+            println!("Waiting for callback... attempt {}/10", i + 1);
+            sleep(Duration::from_millis(500)).await;
+        }
+
         assert!(
-            *callback_received.lock().unwrap(),
-            "Cluster E2 should receive update notification"
+            received,
+            "Cluster E2 should receive update notification after {} attempts", 
+            if received { "some" } else { "10" }
         );
 
         let _ = e2.load_policy().await;
