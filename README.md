@@ -1,15 +1,22 @@
 Redis Watcher
 ---
 
-# test tag
-
 [![Crates.io](https://img.shields.io/crates/v/redis-watcher.svg)](https://crates.io/crates/redis-watcher)
 [![Docs](https://docs.rs/redis-watcher/badge.svg)](https://docs.rs/redis-watcher)
 [![Build Status](https://github.com/casbin-rs/redis-watcher/actions/workflows/ci.yml/badge.svg)](https://github.com/casbin-rs/redis-watcher/actions/workflows/ci.yml)
 [![Codecov](https://codecov.io/gh/casbin-rs/redis-watcher/branch/master/graph/badge.svg)](https://codecov.io/gh/casbin-rs/redis-watcher)
 
+> **✨ 最新更新**: 完成重大架构重构，现在完全支持分布式环境中的多实例同步！详见 [REFACTORING_COMPLETE.md](./REFACTORING_COMPLETE.md)
 
 Redis Watcher is a [Redis](http://redis.io) watcher for [Casbin-RS](https://github.com/casbin/casbin-rs).
+
+## ✨ 核心特性
+
+- ✅ **真正的分布式支持** - 可以在同一进程或不同进程中创建多个实例，自动同步策略
+- ✅ **异步优先设计** - 完全基于 tokio，非阻塞，高性能
+- ✅ **Redis & Redis Cluster** - 支持单机和集群模式
+- ✅ **灵活的消息过滤** - 支持 `ignore_self` 避免接收自己的更新
+- ✅ **完整的测试覆盖** - 包含多实例同步测试
 
 ## Installation
 
