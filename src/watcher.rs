@@ -242,6 +242,7 @@ pub struct RedisWatcher {
     publish_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     subscription_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     is_closed: Arc<AtomicBool>,
+    subscription_ready: Arc<tokio::sync::Notify>,
 }
 
 impl RedisWatcher {
@@ -253,6 +254,7 @@ impl RedisWatcher {
         let (publish_tx, publish_rx) = mpsc::unbounded_channel::<Message>();
 
         let is_closed = Arc::new(AtomicBool::new(false));
+        let subscription_ready = Arc::new(tokio::sync::Notify::new());
 
         // Spawn publish task
         let publish_task = {
@@ -265,7 +267,7 @@ impl RedisWatcher {
             })
         };
 
-        Ok(Self {
+        let watcher = Self {
             client,
             options,
             callback: Arc::new(Mutex::new(None)),
@@ -273,7 +275,14 @@ impl RedisWatcher {
             publish_task: Arc::new(Mutex::new(Some(publish_task))),
             subscription_task: Arc::new(Mutex::new(None)),
             is_closed,
-        })
+            subscription_ready,
+        };
+
+        // Start subscription immediately like Go version does
+        // This ensures the watcher is ready to receive messages before any publishes happen
+        watcher.start_subscription()?;
+
+        Ok(watcher)
     }
 
     /// Create a new Redis watcher for Redis Cluster
@@ -351,6 +360,7 @@ impl RedisWatcher {
         let (publish_tx, publish_rx) = mpsc::unbounded_channel::<Message>();
 
         let is_closed = Arc::new(AtomicBool::new(false));
+        let subscription_ready = Arc::new(tokio::sync::Notify::new());
 
         // Spawn publish task
         let publish_task = {
@@ -363,7 +373,7 @@ impl RedisWatcher {
             })
         };
 
-        Ok(Self {
+        let watcher = Self {
             client,
             options,
             callback: Arc::new(Mutex::new(None)),
@@ -371,7 +381,14 @@ impl RedisWatcher {
             publish_task: Arc::new(Mutex::new(Some(publish_task))),
             subscription_task: Arc::new(Mutex::new(None)),
             is_closed,
-        })
+            subscription_ready,
+        };
+
+        // Start subscription immediately like Go version does
+        // This ensures the watcher is ready to receive messages before any publishes happen
+        watcher.start_subscription()?;
+
+        Ok(watcher)
     }
 
     /// Background worker for publishing messages
@@ -387,26 +404,31 @@ impl RedisWatcher {
             }
 
             if let Ok(payload) = message.to_json() {
-                log::debug!("Publishing message to channel {}: {}", channel, payload);
+                eprintln!(
+                    "[RedisWatcher] Publishing message to channel {}: {}",
+                    channel, payload
+                );
 
                 // Retry publishing with exponential backoff
                 let mut retry_count = 0;
                 loop {
                     match client.publish_message(&channel, payload.clone()).await {
                         Ok(_) => {
-                            log::debug!("Successfully published message to channel: {}", channel);
+                            eprintln!(
+                                "[RedisWatcher] ✓ Successfully published message to channel: {}",
+                                channel
+                            );
                             break;
                         }
                         Err(e) => {
                             retry_count += 1;
-                            log::warn!(
-                                "Failed to publish message (attempt {}): {}",
-                                retry_count,
-                                e
+                            eprintln!(
+                                "[RedisWatcher] ⚠️  Failed to publish message (attempt {}): {}",
+                                retry_count, e
                             );
                             if retry_count >= 3 {
-                                log::error!(
-                                    "Failed to publish message after {} attempts: {}",
+                                eprintln!(
+                                    "[RedisWatcher] ✗ Failed to publish message after {} attempts: {}",
                                     retry_count,
                                     e
                                 );
@@ -420,9 +442,19 @@ impl RedisWatcher {
                     }
                 }
             } else {
-                log::error!("Failed to serialize message to JSON");
+                eprintln!("[RedisWatcher] ✗ Failed to serialize message to JSON");
             }
         }
+    }
+
+    /// Wait for subscription to be ready (similar to Go's WaitGroup.Wait())
+    ///
+    /// This ensures that the watcher is fully subscribed before publishing messages.
+    /// Recommended to call this after creating the watcher and before any policy operations.
+    pub async fn wait_for_ready(&self) {
+        // Wait with timeout
+        let timeout = tokio::time::Duration::from_secs(5);
+        let _ = tokio::time::timeout(timeout, self.subscription_ready.notified()).await;
     }
 
     /// Publish message to Redis channel
@@ -450,10 +482,19 @@ impl RedisWatcher {
         let ignore_self = self.options.ignore_self;
         let is_closed = self.is_closed.clone();
         let client = self.client.clone();
+        let subscription_ready = self.subscription_ready.clone();
 
         let handle = tokio::spawn(async move {
-            Self::subscription_worker(client, channel, local_id, ignore_self, is_closed, callback)
-                .await
+            Self::subscription_worker(
+                client,
+                channel,
+                local_id,
+                ignore_self,
+                is_closed,
+                callback,
+                subscription_ready,
+            )
+            .await
         });
 
         *self.subscription_task.lock().unwrap() = Some(handle);
@@ -468,6 +509,7 @@ impl RedisWatcher {
         ignore_self: bool,
         is_closed: Arc<AtomicBool>,
         callback: CallbackArc,
+        subscription_ready: Arc<tokio::sync::Notify>,
     ) {
         let result = async {
             // Retry connection with backoff
@@ -504,16 +546,19 @@ impl RedisWatcher {
 
                 match pubsub.subscribe(&channel).await {
                     Ok(_) => {
-                        log::debug!("Successfully subscribed to channel: {}", channel);
+                        eprintln!(
+                            "[RedisWatcher] ✓ Successfully subscribed to channel: {}",
+                            channel
+                        );
+                        // Notify that subscription is ready (similar to Go's WaitGroup.Done())
+                        subscription_ready.notify_waiters();
                         break;
                     }
                     Err(e) => {
                         subscribe_retry += 1;
-                        log::warn!(
-                            "Failed to subscribe to channel {} (attempt {}): {}",
-                            channel,
-                            subscribe_retry,
-                            e
+                        eprintln!(
+                            "[RedisWatcher] ⚠️  Failed to subscribe to channel {} (attempt {}): {}",
+                            channel, subscribe_retry, e
                         );
                         if subscribe_retry > 5 {
                             return Err(e);
@@ -540,13 +585,13 @@ impl RedisWatcher {
                         match msg_opt {
                             Some(msg) => {
                                 let payload: String = msg.get_payload().unwrap_or_default();
-                                log::debug!("Received message on channel {}: {}", channel, payload);
+                                eprintln!("[RedisWatcher] 📨 Received message on channel {}: {}", channel, payload);
 
                                 // Parse message and check if we should ignore it
                                 if ignore_self {
                                     if let Ok(parsed_msg) = Message::from_json(&payload) {
                                         if parsed_msg.id == local_id {
-                                            log::debug!("Ignoring self message from: {}", parsed_msg.id);
+                                            eprintln!("[RedisWatcher] 🚫 Ignoring self message from: {}", parsed_msg.id);
                                             continue;
                                         }
                                     }
@@ -555,15 +600,18 @@ impl RedisWatcher {
                                 // Call callback
                                 if let Ok(mut cb_guard) = callback.lock() {
                                     if let Some(ref mut cb) = *cb_guard {
+                                        eprintln!("[RedisWatcher] 🔔 Invoking callback for message");
                                         cb(payload);
+                                    } else {
+                                        eprintln!("[RedisWatcher] ⚠️  Callback not set, message ignored");
                                     }
                                 } else {
-                                    log::warn!("Failed to acquire callback lock");
+                                    eprintln!("[RedisWatcher] ⚠️  Failed to acquire callback lock");
                                 }
                             }
                             None => {
                                 // Stream ended
-                                log::debug!("Pubsub stream ended");
+                                eprintln!("[RedisWatcher] ⚠️  Pubsub stream ended");
                                 break;
                             }
                         }
@@ -588,21 +636,20 @@ impl RedisWatcher {
 
 impl Watcher for RedisWatcher {
     fn set_update_callback(&mut self, cb: Box<dyn FnMut(String) + Send + Sync>) {
+        eprintln!("[RedisWatcher] Setting update callback");
         *self.callback.lock().unwrap() = Some(cb);
 
-        // Stop existing subscription task if any
-        if let Ok(mut handle_guard) = self.subscription_task.lock() {
-            if let Some(handle) = handle_guard.take() {
-                handle.abort();
-            }
-        }
-
-        // Start subscription when callback is set
-        let _ = self.start_subscription();
+        // Note: Unlike the old implementation, we don't restart subscription here
+        // because subscription is already started in new()/new_cluster()
+        // This matches the Go implementation where subscribe() is called in NewWatcher()
     }
 
     fn update(&mut self, d: EventData) {
         let message = event_data_to_message(&d, &self.options.local_id);
+        eprintln!(
+            "[RedisWatcher] update() called with event: {:?}",
+            message.method
+        );
         let _ = self.publish_message(&message);
     }
 }

@@ -24,7 +24,8 @@ mod tests {
     const REDIS_URL: &str = "redis://127.0.0.1:6379";
     const MODEL_PATH: &str = "examples/rbac_model.conf";
     const POLICY_PATH: &str = "examples/rbac_policy.csv";
-    const SYNC_DELAY_MS: u64 = 2000; // Increased delay for CI environment
+    // Reduced sync delay after adding explicit wait_for_ready() calls
+    // const SYNC_DELAY_MS: u64 = 2000; // No longer needed - using wait_for_ready()
 
     // ========== Helper Functions ==========
 
@@ -124,6 +125,13 @@ mod tests {
         let mut w1 = RedisWatcher::new(REDIS_URL, wo1).unwrap();
         let mut w2 = RedisWatcher::new(REDIS_URL, wo2).unwrap();
 
+        // Wait for subscriptions to be ready before setting callbacks
+        println!("Waiting for w1 subscription...");
+        w1.wait_for_ready().await;
+        println!("Waiting for w2 subscription...");
+        w2.wait_for_ready().await;
+        println!("Both watchers are ready");
+
         w1.set_update_callback(Box::new(|msg: String| {
             println!("[E1] Received update: {}", msg);
         }));
@@ -135,7 +143,7 @@ mod tests {
 
         e1.set_watcher(Box::new(w1));
 
-        sleep(Duration::from_millis(SYNC_DELAY_MS)).await;
+        sleep(Duration::from_millis(500)).await;
 
         // e1 adds a new policy - this should trigger watcher notification to e2
         let _ = e1
@@ -146,7 +154,7 @@ mod tests {
             ])
             .await;
 
-        sleep(Duration::from_millis(SYNC_DELAY_MS)).await;
+        sleep(Duration::from_millis(500)).await;
 
         // Verify e2's watcher received the update notification
         let received_msg = update_message.lock().unwrap();
@@ -204,6 +212,9 @@ mod tests {
         let mut w1 = RedisWatcher::new(REDIS_URL, wo1).unwrap();
         let mut w2 = RedisWatcher::new(REDIS_URL, wo2).unwrap();
 
+        w1.wait_for_ready().await;
+        w2.wait_for_ready().await;
+
         w1.set_update_callback(Box::new(|_| {}));
         w2.set_update_callback(Box::new(move |msg: String| {
             println!("[E2] Received update: {}", msg);
@@ -212,7 +223,7 @@ mod tests {
 
         e1.set_watcher(Box::new(w1));
 
-        sleep(Duration::from_millis(SYNC_DELAY_MS)).await;
+        sleep(Duration::from_millis(500)).await;
 
         // e1 removes a policy
         let _ = e1
@@ -223,7 +234,7 @@ mod tests {
             ])
             .await;
 
-        sleep(Duration::from_millis(SYNC_DELAY_MS)).await;
+        sleep(Duration::from_millis(500)).await;
 
         let received_msg = update_message.lock().unwrap();
         assert!(
@@ -271,6 +282,9 @@ mod tests {
         let mut w1 = RedisWatcher::new(REDIS_URL, wo1).unwrap();
         let mut w2 = RedisWatcher::new(REDIS_URL, wo2).unwrap();
 
+        w1.wait_for_ready().await;
+        w2.wait_for_ready().await;
+
         w1.set_update_callback(Box::new(|_| {}));
         w2.set_update_callback(Box::new(move |msg: String| {
             println!("[E2] Received update: {}", msg);
@@ -279,7 +293,7 @@ mod tests {
 
         e1.set_watcher(Box::new(w1));
 
-        sleep(Duration::from_millis(SYNC_DELAY_MS)).await;
+        sleep(Duration::from_millis(500)).await;
 
         // Add multiple policies
         let rules = vec![
@@ -288,7 +302,7 @@ mod tests {
         ];
         let _ = e1.add_policies(rules).await;
 
-        sleep(Duration::from_millis(SYNC_DELAY_MS)).await;
+        sleep(Duration::from_millis(500)).await;
 
         let received_msg = update_message.lock().unwrap();
         assert!(
@@ -328,6 +342,8 @@ mod tests {
             let mut e = Enforcer::new(MODEL_PATH, POLICY_PATH).await.unwrap();
             let mut w = RedisWatcher::new(REDIS_URL, wo).unwrap();
 
+            w.wait_for_ready().await;
+
             let callback_received = Arc::new(Mutex::new(0));
             let callback_clone = callback_received.clone();
 
@@ -342,7 +358,7 @@ mod tests {
             callbacks.push(callback_received);
         }
 
-        sleep(Duration::from_millis(SYNC_DELAY_MS)).await;
+        sleep(Duration::from_millis(500)).await;
 
         // Enforcer 1 adds a policy
         let _ = enforcers[0]
@@ -353,7 +369,7 @@ mod tests {
             ])
             .await;
 
-        sleep(Duration::from_millis(SYNC_DELAY_MS)).await;
+        sleep(Duration::from_millis(500)).await;
 
         // Enforcer 1 should not receive its own update (ignore_self=true)
         // Enforcers 2 and 3 should receive the update
@@ -542,6 +558,11 @@ mod tests {
         let mut w2 = RedisWatcher::new_cluster(&pubsub_node, wo2)
             .expect("Failed to create cluster watcher2");
 
+        println!("Waiting for watchers to be ready...");
+        w1.wait_for_ready().await;
+        w2.wait_for_ready().await;
+        println!("✓ Both cluster watchers are ready");
+
         println!("Setting up callbacks...");
         w1.set_update_callback(Box::new(|msg| {
             println!("[Cluster E1] Published update: {}", msg);
@@ -555,8 +576,8 @@ mod tests {
         e1.set_watcher(Box::new(w1));
         e2.set_watcher(Box::new(w2));
 
-        println!("Waiting for watcher initialization...");
-        sleep(Duration::from_millis(SYNC_DELAY_MS)).await;
+        println!("Waiting for final initialization...");
+        sleep(Duration::from_millis(500)).await;
 
         println!("Adding policy via e1...");
         // e1 adds a policy
@@ -570,7 +591,7 @@ mod tests {
         println!("Add policy result: {:?}", add_result);
 
         println!("Waiting for message propagation...");
-        sleep(Duration::from_millis(SYNC_DELAY_MS)).await;
+        sleep(Duration::from_millis(500)).await;
 
         // Check if callback was received with timeout
         let mut received = false;
