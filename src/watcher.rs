@@ -19,9 +19,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use std::thread::{self, JoinHandle};
 use thiserror::Error;
-use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
 // ========== Error Types ==========
@@ -195,19 +195,17 @@ fn event_data_to_message(event_data: &EventData, local_id: &str) -> Message {
 /// Wrapper to support both standalone and cluster Redis
 enum RedisClientWrapper {
     Standalone(Client),
-    // For Cluster mode, we also keep a standalone client for pubsub
-    // because Redis Cluster doesn't have native async pubsub support
-    ClusterWithPubSub {
-        cluster: Box<redis::cluster::ClusterClient>,
-        pubsub_client: Client,
-    },
+    // For Cluster mode, we use a single node connection for pubsub
+    // Redis Cluster PubSub messages don't propagate across nodes,
+    // so all instances must connect to the same node for pub/sub
+    ClusterPubSub { pubsub_client: Client },
 }
 
 impl RedisClientWrapper {
     async fn get_async_pubsub(&self) -> redis::RedisResult<redis::aio::PubSub> {
         match self {
             RedisClientWrapper::Standalone(client) => client.get_async_pubsub().await,
-            RedisClientWrapper::ClusterWithPubSub { pubsub_client, .. } => {
+            RedisClientWrapper::ClusterPubSub { pubsub_client } => {
                 // Use the dedicated pubsub client for cluster mode
                 pubsub_client.get_async_pubsub().await
             }
@@ -221,10 +219,13 @@ impl RedisClientWrapper {
                 let _: i32 = conn.publish(channel, payload).await?;
                 Ok(())
             }
-            RedisClientWrapper::ClusterWithPubSub { cluster, .. } => {
-                // Use cluster connection for publishing
-                let mut conn = cluster.get_async_connection().await?;
+            RedisClientWrapper::ClusterPubSub { pubsub_client } => {
+                // For Redis Cluster, we need to publish to the same node where PubSub is subscribed
+                // because PubSub messages don't propagate across cluster nodes
+                // Use the pubsub_client (single node) for both publishing and subscribing
+                let mut conn = pubsub_client.get_multiplexed_async_connection().await?;
                 let _: i32 = conn.publish(channel, payload).await?;
+                log::debug!("Published to cluster node via pubsub_client");
                 Ok(())
             }
         }
@@ -234,73 +235,66 @@ impl RedisClientWrapper {
 // ========== Redis Watcher Implementation ==========
 
 pub struct RedisWatcher {
-    runtime: Arc<Runtime>,
     client: Arc<RedisClientWrapper>,
     options: crate::WatcherOptions,
     callback: CallbackArc,
-    subscription_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    publish_tx: mpsc::UnboundedSender<Message>,
+    publish_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    subscription_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     is_closed: Arc<AtomicBool>,
+    subscription_ready: Arc<tokio::sync::Notify>,
 }
 
 impl RedisWatcher {
     /// Create a new Redis watcher for standalone Redis
     pub fn new(redis_url: &str, options: crate::WatcherOptions) -> Result<Self> {
-        let runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| WatcherError::Runtime(e.to_string()))?,
-        );
-
         let client = Arc::new(RedisClientWrapper::Standalone(Client::open(redis_url)?));
 
-        // Test connection
-        let client_clone = client.clone();
-        runtime.block_on(async move {
-            match &*client_clone {
-                RedisClientWrapper::Standalone(c) => {
-                    let mut conn = c.get_multiplexed_async_connection().await?;
-                    let _: String = redis::cmd("PING").query_async(&mut conn).await?;
-                }
-                RedisClientWrapper::ClusterWithPubSub { .. } => unreachable!(),
-            }
-            Ok::<(), WatcherError>(())
-        })?;
+        // Create publish channel
+        let (publish_tx, publish_rx) = mpsc::unbounded_channel::<Message>();
 
-        Ok(Self {
-            runtime,
+        let is_closed = Arc::new(AtomicBool::new(false));
+        let subscription_ready = Arc::new(tokio::sync::Notify::new());
+
+        // Spawn publish task
+        let publish_task = {
+            let client = client.clone();
+            let channel = options.channel.clone();
+            let is_closed = is_closed.clone();
+
+            tokio::spawn(async move {
+                Self::publish_worker(publish_rx, client, channel, is_closed).await
+            })
+        };
+
+        let watcher = Self {
             client,
             options,
             callback: Arc::new(Mutex::new(None)),
-            subscription_handle: Arc::new(Mutex::new(None)),
-            is_closed: Arc::new(AtomicBool::new(false)),
-        })
+            publish_tx,
+            publish_task: Arc::new(Mutex::new(Some(publish_task))),
+            subscription_task: Arc::new(Mutex::new(None)),
+            is_closed,
+            subscription_ready,
+        };
+
+        // Start subscription immediately like Go version does
+        // This ensures the watcher is ready to receive messages before any publishes happen
+        watcher.start_subscription()?;
+
+        Ok(watcher)
     }
 
     /// Create a new Redis watcher for Redis Cluster
     ///
+    /// Note: Redis Cluster PubSub messages don't propagate between nodes.
+    /// All instances MUST connect to the SAME node for pub/sub to work.
+    /// This method uses the first URL as the fixed PubSub node.
+    ///
     /// # Arguments
-    /// * `cluster_urls` - Comma-separated list of Redis cluster nodes (e.g., "127.0.0.1:7000,127.0.0.1:7001,127.0.0.1:7002")
+    /// * `cluster_urls` - Comma-separated Redis URLs (first URL used for PubSub)
     /// * `options` - Watcher configuration options
-    ///
-    /// # Example
-    /// ```no_run
-    /// use redis_watcher_temp::{RedisWatcher, WatcherOptions};
-    ///
-    /// let options = WatcherOptions::default();
-    /// let watcher = RedisWatcher::new_cluster(
-    ///     "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002",
-    ///     options
-    /// ).unwrap();
-    /// ```
     pub fn new_cluster(cluster_urls: &str, options: crate::WatcherOptions) -> Result<Self> {
-        let runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| WatcherError::Runtime(e.to_string()))?,
-        );
-
         // Parse cluster URLs
         let urls: Vec<&str> = cluster_urls.split(',').map(|s| s.trim()).collect();
         if urls.is_empty() {
@@ -309,56 +303,120 @@ impl RedisWatcher {
             ));
         }
 
-        // Create cluster client
-        let cluster_client = redis::cluster::ClusterClient::builder(urls.clone())
-            .build()
-            .map_err(|e| {
-                WatcherError::Configuration(format!("Failed to build cluster client: {}", e))
-            })?;
-
-        // Create a standalone client for pubsub (connect to first node)
-        // Redis Cluster pubsub requires connecting to a specific node
-        let pubsub_client = Client::open(urls[0]).map_err(|e| {
+        // For Redis Cluster PubSub: use the first node for both publish and subscribe
+        // This ensures messages are sent and received on the same node
+        // since PubSub messages don't propagate across cluster nodes
+        let pubsub_url = urls[0];
+        let pubsub_client = Client::open(pubsub_url).map_err(|e| {
             WatcherError::Configuration(format!("Failed to create pubsub client: {}", e))
         })?;
 
-        let client = Arc::new(RedisClientWrapper::ClusterWithPubSub {
-            cluster: Box::new(cluster_client),
-            pubsub_client,
-        });
+        log::warn!(
+            "Redis Cluster PubSub using fixed node: {} - ALL instances MUST use the SAME node!",
+            pubsub_url
+        );
 
-        // Test connection
-        let client_clone = client.clone();
-        runtime.block_on(async move {
-            match &*client_clone {
-                RedisClientWrapper::Standalone(_) => unreachable!(),
-                RedisClientWrapper::ClusterWithPubSub {
-                    cluster,
-                    pubsub_client,
-                } => {
-                    // Test cluster connection
-                    let mut conn = cluster
-                        .get_async_connection()
-                        .await
-                        .map_err(WatcherError::RedisConnection)?;
-                    let _: String = redis::cmd("PING").query_async(&mut conn).await?;
+        let client = Arc::new(RedisClientWrapper::ClusterPubSub { pubsub_client });
 
-                    // Test pubsub connection
-                    let mut pubsub_conn = pubsub_client.get_multiplexed_async_connection().await?;
-                    let _: String = redis::cmd("PING").query_async(&mut pubsub_conn).await?;
-                }
-            }
-            Ok::<(), WatcherError>(())
-        })?;
+        // Create publish channel
+        let (publish_tx, publish_rx) = mpsc::unbounded_channel::<Message>();
 
-        Ok(Self {
-            runtime,
+        let is_closed = Arc::new(AtomicBool::new(false));
+        let subscription_ready = Arc::new(tokio::sync::Notify::new());
+
+        // Spawn publish task
+        let publish_task = {
+            let client = client.clone();
+            let channel = options.channel.clone();
+            let is_closed = is_closed.clone();
+
+            tokio::spawn(async move {
+                Self::publish_worker(publish_rx, client, channel, is_closed).await
+            })
+        };
+
+        let watcher = Self {
             client,
             options,
             callback: Arc::new(Mutex::new(None)),
-            subscription_handle: Arc::new(Mutex::new(None)),
-            is_closed: Arc::new(AtomicBool::new(false)),
-        })
+            publish_tx,
+            publish_task: Arc::new(Mutex::new(Some(publish_task))),
+            subscription_task: Arc::new(Mutex::new(None)),
+            is_closed,
+            subscription_ready,
+        };
+
+        // Start subscription immediately like Go version does
+        // This ensures the watcher is ready to receive messages before any publishes happen
+        watcher.start_subscription()?;
+
+        Ok(watcher)
+    }
+
+    /// Background worker for publishing messages
+    async fn publish_worker(
+        mut rx: mpsc::UnboundedReceiver<Message>,
+        client: Arc<RedisClientWrapper>,
+        channel: String,
+        is_closed: Arc<AtomicBool>,
+    ) {
+        while let Some(message) = rx.recv().await {
+            if is_closed.load(Ordering::Relaxed) {
+                break;
+            }
+
+            if let Ok(payload) = message.to_json() {
+                eprintln!(
+                    "[RedisWatcher] Publishing message to channel {}: {}",
+                    channel, payload
+                );
+
+                // Retry publishing with exponential backoff
+                let mut retry_count = 0;
+                loop {
+                    match client.publish_message(&channel, payload.clone()).await {
+                        Ok(_) => {
+                            eprintln!(
+                                "[RedisWatcher] Successfully published message to channel: {}",
+                                channel
+                            );
+                            break;
+                        }
+                        Err(e) => {
+                            retry_count += 1;
+                            eprintln!(
+                                "[RedisWatcher] Failed to publish message (attempt {}): {}",
+                                retry_count, e
+                            );
+                            if retry_count >= 3 {
+                                eprintln!(
+                                    "[RedisWatcher] Failed to publish message after {} attempts: {}",
+                                    retry_count,
+                                    e
+                                );
+                                break;
+                            }
+                            tokio::time::sleep(tokio::time::Duration::from_millis(
+                                100 * retry_count,
+                            ))
+                            .await;
+                        }
+                    }
+                }
+            } else {
+                eprintln!("[RedisWatcher] Failed to serialize message to JSON");
+            }
+        }
+    }
+
+    /// Wait for subscription to be ready (similar to Go's WaitGroup.Wait())
+    ///
+    /// This ensures that the watcher is fully subscribed before publishing messages.
+    /// Recommended to call this after creating the watcher and before any policy operations.
+    pub async fn wait_for_ready(&self) {
+        // Wait with timeout
+        let timeout = tokio::time::Duration::from_secs(5);
+        let _ = tokio::time::timeout(timeout, self.subscription_ready.notified()).await;
     }
 
     /// Publish message to Redis channel
@@ -367,14 +425,9 @@ impl RedisWatcher {
             return Err(WatcherError::AlreadyClosed);
         }
 
-        let payload = message.to_json()?;
-        let client = self.client.clone();
-        let channel = self.options.channel.clone();
-
-        self.runtime.block_on(async move {
-            client.publish_message(&channel, payload).await?;
-            Ok::<(), WatcherError>(())
-        })?;
+        self.publish_tx
+            .send(message.clone())
+            .map_err(|_| WatcherError::Runtime("Publish channel closed".to_string()))?;
 
         Ok(())
     }
@@ -391,101 +444,174 @@ impl RedisWatcher {
         let ignore_self = self.options.ignore_self;
         let is_closed = self.is_closed.clone();
         let client = self.client.clone();
+        let subscription_ready = self.subscription_ready.clone();
 
-        let handle = thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
+        let handle = tokio::spawn(async move {
+            Self::subscription_worker(
+                client,
+                channel,
+                local_id,
+                ignore_self,
+                is_closed,
+                callback,
+                subscription_ready,
+            )
+            .await
+        });
 
-            rt.block_on(async move {
-                // Use a timeout-aware subscription loop
-                let result = async {
-                    let mut pubsub = match client.get_async_pubsub().await {
-                        Ok(p) => p,
-                        Err(e) => {
-                            log::error!("Failed to get async pubsub: {}", e);
+        *self.subscription_task.lock().unwrap() = Some(handle);
+        Ok(())
+    }
+
+    /// Background worker for subscription
+    async fn subscription_worker(
+        client: Arc<RedisClientWrapper>,
+        channel: String,
+        local_id: String,
+        ignore_self: bool,
+        is_closed: Arc<AtomicBool>,
+        callback: CallbackArc,
+        subscription_ready: Arc<tokio::sync::Notify>,
+    ) {
+        let result = async {
+            // Retry connection with backoff
+            let mut retry_count = 0;
+            let mut pubsub = loop {
+                if is_closed.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+
+                match client.get_async_pubsub().await {
+                    Ok(p) => break p,
+                    Err(e) => {
+                        retry_count += 1;
+                        log::warn!(
+                            "Failed to get async pubsub (attempt {}): {}",
+                            retry_count,
+                            e
+                        );
+                        if retry_count > 5 {
                             return Err(e);
                         }
-                    };
-
-                    if let Err(e) = pubsub.subscribe(&channel).await {
-                        log::error!("Failed to subscribe to channel {}: {}", channel, e);
-                        return Err(e);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(1000 * retry_count))
+                            .await;
                     }
+                }
+            };
 
-                    log::debug!("Successfully subscribed to channel: {}", channel);
+            // Subscribe with retry
+            let mut subscribe_retry = 0;
+            loop {
+                if is_closed.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
 
-                    let mut stream = pubsub.on_message();
+                match pubsub.subscribe(&channel).await {
+                    Ok(_) => {
+                        eprintln!(
+                            "[RedisWatcher] Successfully subscribed to channel: {}",
+                            channel
+                        );
+                        // Notify that subscription is ready (similar to Go's WaitGroup.Done())
+                        subscription_ready.notify_waiters();
+                        break;
+                    }
+                    Err(e) => {
+                        subscribe_retry += 1;
+                        eprintln!(
+                            "[RedisWatcher] Failed to subscribe to channel {} (attempt {}): {}",
+                            channel, subscribe_retry, e
+                        );
+                        if subscribe_retry > 5 {
+                            return Err(e);
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            500 * subscribe_retry,
+                        ))
+                        .await;
+                    }
+                }
+            }
 
-                    loop {
-                        // Check if closed before waiting for next message
+            let mut stream = pubsub.on_message();
+
+            loop {
+                // Check if closed before waiting for next message
+                if is_closed.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                // Use tokio::select! to check for shutdown while waiting
+                tokio::select! {
+                    msg_opt = stream.next() => {
+                        match msg_opt {
+                            Some(msg) => {
+                                let payload: String = msg.get_payload().unwrap_or_default();
+                                eprintln!("[RedisWatcher] Received message on channel {}: {}", channel, payload);
+
+                                // Parse message and check if we should ignore it
+                                if ignore_self {
+                                    if let Ok(parsed_msg) = Message::from_json(&payload) {
+                                        if parsed_msg.id == local_id {
+                                            eprintln!("[RedisWatcher] Ignoring self message from: {}", parsed_msg.id);
+                                            continue;
+                                        }
+                                    }
+                                }
+
+                                // Call callback
+                                if let Ok(mut cb_guard) = callback.lock() {
+                                    if let Some(ref mut cb) = *cb_guard {
+                                        eprintln!("[RedisWatcher] Invoking callback for message");
+                                        cb(payload);
+                                    } else {
+                                        eprintln!("[RedisWatcher] Callback not set, message ignored");
+                                    }
+                                } else {
+                                    eprintln!("[RedisWatcher] Failed to acquire callback lock");
+                                }
+                            }
+                            None => {
+                                // Stream ended
+                                eprintln!("[RedisWatcher] Pubsub stream ended");
+                                break;
+                            }
+                        }
+                    }
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                        // Periodic check for shutdown
                         if is_closed.load(Ordering::Relaxed) {
                             break;
                         }
-
-                        // Use tokio::select! to check for shutdown while waiting
-                        tokio::select! {
-                            msg_opt = stream.next() => {
-                                match msg_opt {
-                                    Some(msg) => {
-                                        let payload: String = msg.get_payload().unwrap_or_default();
-
-                                        // Parse message and check if we should ignore it
-                                        if ignore_self {
-                                            if let Ok(parsed_msg) = Message::from_json(&payload) {
-                                                if parsed_msg.id == local_id {
-                                                    continue;
-                                                }
-                                            }
-                                        }
-
-                                        // Call callback
-                                        if let Ok(mut cb_guard) = callback.lock() {
-                                            if let Some(ref mut cb) = *cb_guard {
-                                                cb(payload);
-                                            }
-                                        }
-                                    }
-                                    None => {
-                                        // Stream ended
-                                        log::debug!("Pubsub stream ended");
-                                        break;
-                                    }
-                                }
-                            }
-                            _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
-                                // Periodic check for shutdown
-                                if is_closed.load(Ordering::Relaxed) {
-                                    break;
-                                }
-                            }
-                        }
                     }
-
-                    Ok::<(), redis::RedisError>(())
-                };
-
-                if let Err(e) = result.await {
-                    log::error!("Subscription error: {}", e);
                 }
-            });
-        });
+            }
 
-        *self.subscription_handle.lock().unwrap() = Some(handle);
-        Ok(())
+            Ok::<(), redis::RedisError>(())
+        };
+
+        if let Err(e) = result.await {
+            log::error!("Subscription error: {}", e);
+        }
     }
 }
 
 impl Watcher for RedisWatcher {
     fn set_update_callback(&mut self, cb: Box<dyn FnMut(String) + Send + Sync>) {
+        eprintln!("[RedisWatcher] Setting update callback");
         *self.callback.lock().unwrap() = Some(cb);
-        // Start subscription when callback is set
-        let _ = self.start_subscription();
+
+        // Note: Unlike the old implementation, we don't restart subscription here
+        // because subscription is already started in new()/new_cluster()
+        // This matches the Go implementation where subscribe() is called in NewWatcher()
     }
 
     fn update(&mut self, d: EventData) {
         let message = event_data_to_message(&d, &self.options.local_id);
+        eprintln!(
+            "[RedisWatcher] update() called with event: {:?}",
+            message.method
+        );
         let _ = self.publish_message(&message);
     }
 }
@@ -495,16 +621,17 @@ impl Drop for RedisWatcher {
         // Signal closure first
         self.is_closed.store(true, Ordering::Relaxed);
 
-        // Wait for subscription thread to finish with a timeout
-        if let Ok(mut handle_guard) = self.subscription_handle.lock() {
+        // Abort subscription task
+        if let Ok(mut handle_guard) = self.subscription_task.lock() {
             if let Some(handle) = handle_guard.take() {
-                // Give the thread a reasonable time to finish
-                // The subscription loop checks is_closed every 100ms, so 500ms should be enough
-                let _join_handle = std::thread::spawn(move || handle.join());
+                handle.abort();
+            }
+        }
 
-                // Don't block indefinitely - if thread doesn't finish in 1 second, continue anyway
-                std::thread::sleep(std::time::Duration::from_millis(1000));
-                // Thread will be cleaned up by OS if it's still running
+        // Abort publish task
+        if let Ok(mut handle_guard) = self.publish_task.lock() {
+            if let Some(handle) = handle_guard.take() {
+                handle.abort();
             }
         }
     }
