@@ -502,6 +502,7 @@ mod tests {
         println!("Using Redis Cluster URLs: {}", cluster_urls);
         let unique_channel = format!("test_cluster_sync_{}", Uuid::new_v4());
         println!("Using unique channel: {}", unique_channel);
+        let channel_for_error = unique_channel.clone();
 
         // Create two enforcers with cluster watchers
         let wo1 = WatcherOptions::default()
@@ -519,6 +520,8 @@ mod tests {
 
         let callback_received = Arc::new(Mutex::new(false));
         let callback_clone = callback_received.clone();
+        let message_content = Arc::new(Mutex::new(String::new()));
+        let message_clone = message_content.clone();
 
         println!("Creating Redis Cluster watchers...");
         let mut w1 = RedisWatcher::new_cluster(&cluster_urls, wo1)
@@ -528,10 +531,11 @@ mod tests {
 
         println!("Setting up callbacks...");
         w1.set_update_callback(Box::new(|msg| {
-            println!("[Cluster E1] Sent update: {}", msg);
+            println!("[Cluster E1] Published update: {}", msg);
         }));
         w2.set_update_callback(Box::new(move |msg: String| {
-            println!("[Cluster E2] Received update: {}", msg);
+            println!("[Cluster E2] Received update notification: {}", msg);
+            *message_clone.lock().unwrap() = msg;
             *callback_clone.lock().unwrap() = true;
         }));
 
@@ -543,13 +547,14 @@ mod tests {
 
         println!("Adding policy via e1...");
         // e1 adds a policy
-        let _ = e1
+        let add_result = e1
             .add_policy(vec![
                 "bob".to_string(),
                 "data2".to_string(),
                 "write".to_string(),
             ])
             .await;
+        println!("Add policy result: {:?}", add_result);
 
         println!("Waiting for message propagation...");
         sleep(Duration::from_millis(SYNC_DELAY_MS)).await;
@@ -559,16 +564,29 @@ mod tests {
         for i in 0..10 {
             received = *callback_received.lock().unwrap();
             if received {
+                let msg = message_content.lock().unwrap();
+                println!("✓ Callback received after attempt {}: {}", i + 1, msg);
                 break;
             }
             println!("Waiting for callback... attempt {}/10", i + 1);
             sleep(Duration::from_millis(500)).await;
         }
 
+        if !received {
+            let msg = message_content.lock().unwrap();
+            eprintln!("✗ Failed to receive callback after 10 attempts");
+            eprintln!("Last message content: {}", msg);
+            eprintln!("Callback received flag: {}", received);
+        }
+
         assert!(
             received,
-            "Cluster E2 should receive update notification after {} attempts",
-            if received { "some" } else { "10" }
+            "Cluster E2 should receive update notification. Check:\n\
+             1. Both watchers connect to the same Redis node\n\
+             2. Channel name matches: {}\n\
+             3. Redis Cluster is properly configured\n\
+             4. Check logs above for publish/subscribe details",
+            channel_for_error
         );
 
         let _ = e2.load_policy().await;

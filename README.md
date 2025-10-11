@@ -103,6 +103,27 @@ fn main() -> redis_watcher::Result<()> {
 - **Scalability**: Distributes load across cluster nodes
 - **Pub/Sub Support**: Uses dedicated connection for pub/sub operations in cluster mode
 
+**⚠️ Important: Redis Cluster PubSub Limitation**
+
+Redis Cluster PubSub messages **do not propagate across cluster nodes**. To ensure reliable message delivery:
+
+1. All watcher instances **must connect to the same Redis node** for PubSub
+2. The implementation uses the **first URL** in the cluster URL list for all PubSub operations
+3. Ensure this node is stable and available
+
+```rust
+// All instances should use the SAME first URL for PubSub
+let urls = "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002";
+
+// Instance 1
+let watcher1 = RedisWatcher::new_cluster(urls, options1)?;
+
+// Instance 2 - uses same first URL (7000) for PubSub
+let watcher2 = RedisWatcher::new_cluster(urls, options2)?;
+```
+
+For more details, see [REDIS_CLUSTER_FIX.md](./REDIS_CLUSTER_FIX.md).
+
 ## Configuration
 
 ### WatcherOptions

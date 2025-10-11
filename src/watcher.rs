@@ -195,19 +195,17 @@ fn event_data_to_message(event_data: &EventData, local_id: &str) -> Message {
 /// Wrapper to support both standalone and cluster Redis
 enum RedisClientWrapper {
     Standalone(Client),
-    // For Cluster mode, we also keep a standalone client for pubsub
-    // because Redis Cluster doesn't have native async pubsub support
-    ClusterWithPubSub {
-        cluster: Box<redis::cluster::ClusterClient>,
-        pubsub_client: Client,
-    },
+    // For Cluster mode, we use a single node connection for pubsub
+    // Redis Cluster PubSub messages don't propagate across nodes,
+    // so all instances must connect to the same node for pub/sub
+    ClusterPubSub { pubsub_client: Client },
 }
 
 impl RedisClientWrapper {
     async fn get_async_pubsub(&self) -> redis::RedisResult<redis::aio::PubSub> {
         match self {
             RedisClientWrapper::Standalone(client) => client.get_async_pubsub().await,
-            RedisClientWrapper::ClusterWithPubSub { pubsub_client, .. } => {
+            RedisClientWrapper::ClusterPubSub { pubsub_client } => {
                 // Use the dedicated pubsub client for cluster mode
                 pubsub_client.get_async_pubsub().await
             }
@@ -221,10 +219,13 @@ impl RedisClientWrapper {
                 let _: i32 = conn.publish(channel, payload).await?;
                 Ok(())
             }
-            RedisClientWrapper::ClusterWithPubSub { cluster, .. } => {
-                // Use cluster connection for publishing
-                let mut conn = cluster.get_async_connection().await?;
+            RedisClientWrapper::ClusterPubSub { pubsub_client } => {
+                // For Redis Cluster, we need to publish to the same node where PubSub is subscribed
+                // because PubSub messages don't propagate across cluster nodes
+                // Use the pubsub_client (single node) for both publishing and subscribing
+                let mut conn = pubsub_client.get_multiplexed_async_connection().await?;
                 let _: i32 = conn.publish(channel, payload).await?;
+                log::debug!("Published to cluster node via pubsub_client");
                 Ok(())
             }
         }
@@ -300,23 +301,19 @@ impl RedisWatcher {
             ));
         }
 
-        // Create cluster client
-        let cluster_client = redis::cluster::ClusterClient::builder(urls.clone())
-            .build()
-            .map_err(|e| {
-                WatcherError::Configuration(format!("Failed to build cluster client: {}", e))
-            })?;
-
-        // Create a standalone client for pubsub (connect to first node)
-        // Redis Cluster pubsub requires connecting to a specific node
+        // For Redis Cluster PubSub: use the first node for both publish and subscribe
+        // This ensures messages are sent and received on the same node
+        // since PubSub messages don't propagate across cluster nodes
         let pubsub_client = Client::open(urls[0]).map_err(|e| {
             WatcherError::Configuration(format!("Failed to create pubsub client: {}", e))
         })?;
 
-        let client = Arc::new(RedisClientWrapper::ClusterWithPubSub {
-            cluster: Box::new(cluster_client),
-            pubsub_client,
-        });
+        log::info!(
+            "Redis Cluster PubSub configured to use single node: {}",
+            urls[0]
+        );
+
+        let client = Arc::new(RedisClientWrapper::ClusterPubSub { pubsub_client });
 
         // Create publish channel
         let (publish_tx, publish_rx) = mpsc::unbounded_channel::<Message>();
