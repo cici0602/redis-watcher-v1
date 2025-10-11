@@ -580,10 +580,11 @@ mod tests {
         sleep(Duration::from_millis(500)).await;
 
         println!("Adding policy via e1...");
-        // e1 adds a policy
+        let unique_subject = format!("cluster-user-{}", Uuid::new_v4());
+        // e1 adds a policy that is guaranteed to be new so the watcher emits an update
         let add_result = e1
             .add_policy(vec![
-                "bob".to_string(),
+                unique_subject.clone(),
                 "data2".to_string(),
                 "write".to_string(),
             ])
