@@ -495,11 +495,19 @@ mod tests {
             return;
         }
 
-        let cluster_urls = std::env::var("REDIS_CLUSTER_URLS").unwrap_or_else(|_| {
-            "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002".to_string()
-        });
+        // ⚠️  CRITICAL: Redis Cluster PubSub messages DO NOT propagate between nodes
+        // ALL watcher instances MUST connect to the SAME node for pub/sub to work
+        // Use a single node URL instead of multiple nodes
+        let pubsub_node = std::env::var("REDIS_CLUSTER_PUBSUB_NODE")
+            .unwrap_or_else(|_| "redis://127.0.0.1:7000".to_string());
 
-        println!("Using Redis Cluster URLs: {}", cluster_urls);
+        println!("╔════════════════════════════════════════════════════════════════╗");
+        println!("║  Redis Cluster PubSub Test Configuration                      ║");
+        println!("╠════════════════════════════════════════════════════════════════╣");
+        println!("║  ⚠️  IMPORTANT: All watchers MUST use the SAME node!          ║");
+        println!("║  PubSub node: {:48} ║", pubsub_node);
+        println!("╚════════════════════════════════════════════════════════════════╝");
+
         let unique_channel = format!("test_cluster_sync_{}", Uuid::new_v4());
         println!("Using unique channel: {}", unique_channel);
         let channel_for_error = unique_channel.clone();
@@ -523,10 +531,15 @@ mod tests {
         let message_content = Arc::new(Mutex::new(String::new()));
         let message_clone = message_content.clone();
 
-        println!("Creating Redis Cluster watchers...");
-        let mut w1 = RedisWatcher::new_cluster(&cluster_urls, wo1)
+        println!(
+            "Creating Redis Cluster watchers (both using node: {})...",
+            pubsub_node
+        );
+
+        // ✅ CORRECT: Both watchers use the SAME single node URL
+        let mut w1 = RedisWatcher::new_cluster(&pubsub_node, wo1)
             .expect("Failed to create cluster watcher1");
-        let mut w2 = RedisWatcher::new_cluster(&cluster_urls, wo2)
+        let mut w2 = RedisWatcher::new_cluster(&pubsub_node, wo2)
             .expect("Failed to create cluster watcher2");
 
         println!("Setting up callbacks...");
@@ -582,11 +595,14 @@ mod tests {
         assert!(
             received,
             "Cluster E2 should receive update notification. Check:\n\
-             1. Both watchers connect to the same Redis node\n\
+             1. Both watchers connect to the same Redis node: {}\n\
              2. Channel name matches: {}\n\
              3. Redis Cluster is properly configured\n\
-             4. Check logs above for publish/subscribe details",
-            channel_for_error
+             4. Check logs above for publish/subscribe details\n\
+             \n\
+             ⚠️  Remember: Redis Cluster PubSub messages DO NOT propagate between nodes!\n\
+             All instances MUST use the SAME node URL for PubSub.",
+            pubsub_node, channel_for_error
         );
 
         let _ = e2.load_policy().await;

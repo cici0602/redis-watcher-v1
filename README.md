@@ -79,9 +79,10 @@ fn main() -> redis_watcher::Result<()> {
         .with_ignore_self(true);
 
     // Initialize watcher with Redis cluster
-    // Provide comma-separated list of cluster nodes
+    // ⚠️ IMPORTANT: All instances MUST use the same first URL for PubSub!
     let mut watcher = RedisWatcher::new_cluster(
-        "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002",
+        "redis://127.0.0.1:7000",  // Single node for PubSub (recommended)
+        // or: "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002"
         options
     )?;
 
@@ -98,31 +99,61 @@ fn main() -> redis_watcher::Result<()> {
 ```
 
 **Cluster Features:**
-- **High Availability**: Connects to multiple Redis cluster nodes
-- **Automatic Failover**: Redis cluster handles node failures automatically
-- **Scalability**: Distributes load across cluster nodes
-- **Pub/Sub Support**: Uses dedicated connection for pub/sub operations in cluster mode
+- **High Availability**: Connects to Redis cluster for resilience
+- **Automatic Failover**: Redis cluster handles node failures
+- **Scalability**: Supports distributed deployments
 
-**⚠️ Important: Redis Cluster PubSub Limitation**
+**⚠️ CRITICAL: Redis Cluster PubSub Limitation**
 
-Redis Cluster PubSub messages **do not propagate across cluster nodes**. To ensure reliable message delivery:
+Redis Cluster PubSub messages **DO NOT** propagate across cluster nodes. This is a fundamental limitation of Redis Cluster architecture.
 
-1. All watcher instances **must connect to the same Redis node** for PubSub
-2. The implementation uses the **first URL** in the cluster URL list for all PubSub operations
-3. Ensure this node is stable and available
+**What this means:**
+- A message published to node A will **only** be received by subscribers connected to node A
+- Subscribers connected to node B or C will **not** receive the message
+- This is **not a bug** - it's how Redis Cluster PubSub works
+
+**Solution:**
+
+All watcher instances **must connect to the same Redis node** for PubSub operations:
 
 ```rust
-// All instances should use the SAME first URL for PubSub
-let urls = "redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002";
+// ✅ CORRECT: All instances use the same node (7000)
+let pubsub_node = "redis://127.0.0.1:7000";
 
-// Instance 1
-let watcher1 = RedisWatcher::new_cluster(urls, options1)?;
+// Instance 1 (could be in process A, server X)
+let watcher1 = RedisWatcher::new_cluster(pubsub_node, options1)?;
 
-// Instance 2 - uses same first URL (7000) for PubSub
-let watcher2 = RedisWatcher::new_cluster(urls, options2)?;
+// Instance 2 (could be in process B, server Y)
+let watcher2 = RedisWatcher::new_cluster(pubsub_node, options2)?;
+
+// ❌ WRONG: Different first nodes - messages won't be received!
+let watcher3 = RedisWatcher::new_cluster("redis://127.0.0.1:7001", options3)?;  // Won't work!
 ```
 
-For more details, see [REDIS_CLUSTER_FIX.md](./REDIS_CLUSTER_FIX.md).
+**How it works:**
+- The `new_cluster()` method uses the **first URL** in your list as the fixed PubSub node
+- All publish and subscribe operations use this single node
+- Data operations can still use the full cluster (this is just for PubSub)
+
+**Production Recommendations:**
+
+1. **Dedicated PubSub Node**: Use a single, stable Redis node for PubSub
+   ```rust
+   let watcher = RedisWatcher::new_cluster("redis://pubsub-node:7000", options)?;
+   ```
+
+2. **High Availability**: Put the PubSub node behind a load balancer or use Redis Sentinel for failover
+
+3. **Monitoring**: Monitor the PubSub node's health carefully as it's a single point of communication
+
+4. **Environment Variable**: Configure the PubSub node via environment variable for flexibility
+   ```rust
+   let pubsub_node = std::env::var("REDIS_PUBSUB_NODE")
+       .unwrap_or_else(|_| "redis://127.0.0.1:7000".to_string());
+   let watcher = RedisWatcher::new_cluster(&pubsub_node, options)?;
+   ```
+
+For detailed technical explanation, see [CLUSTER_PUBSUB_ANALYSIS.md](./CLUSTER_PUBSUB_ANALYSIS.md).
 
 ## Configuration
 
