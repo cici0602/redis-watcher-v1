@@ -10,6 +10,55 @@ Redis Watcher
 
 Redis Watcher is a [Redis](http://redis.io) watcher for [Casbin-RS](https://github.com/casbin/casbin-rs).
 
+## 🎯 What is Redis Watcher?
+
+**Redis Watcher is a notification mechanism for distributed Casbin policy synchronization.**
+
+### What it Does ✅
+- **Publishes** notifications when policies change in one enforcer instance
+- **Receives** notifications via Redis PubSub when other instances change policies
+- **Invokes** callbacks to alert your application of policy changes
+
+### What it Does NOT Do ❌
+- **Does NOT synchronize** the actual policy data between instances
+- **Does NOT store** policies in Redis or any database
+- **Does NOT replace** your database adapter
+
+### How it Works 🔄
+
+In a distributed system with multiple Casbin instances:
+
+```
+┌──────────────┐                           ┌──────────────┐
+│  Enforcer 1  │                           │  Enforcer 2  │
+└──────┬───────┘                           └──────┬───────┘
+       │ 1. Save to DB                            │
+       ▼                                          │
+┌────────────────────────────────────────────────┴──────┐
+│     Shared Database (MySQL/PostgreSQL/SQLite)         │
+│              (Your DatabaseAdapter)                   │
+└────────────────────────────────────────────────────────┘
+       │                                          ▲
+       │ 2. Notify via Watcher                   │
+       ▼                                          │
+┌──────────────────────────────────────────────────────┐
+│          Redis PubSub (Redis Watcher)                │
+│             👈 THIS COMPONENT                        │
+└──────────────────────────────────────────────────────┘
+       │                                          │
+       └─ 3. Notify E2 ──────── 4. Reload ───────┘
+```
+
+**Complete Flow:**
+1. **Enforcer 1** modifies policy → saves to shared database (via DatabaseAdapter)
+2. **Enforcer 1** publishes notification → via Redis Watcher
+3. **Enforcer 2** receives notification → via Redis Watcher callback
+4. **Enforcer 2** reloads policies → from shared database (via DatabaseAdapter)
+
+**Key Point:** You need **BOTH**:
+- A **shared database adapter** (for actual policy data)
+- **Redis Watcher** (for change notifications)
+
 ## ✨ 核心特性
 
 - ✅ **真正的分布式支持** - 可以在同一进程或不同进程中创建多个实例，自动同步策略
